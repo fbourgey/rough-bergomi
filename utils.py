@@ -1,5 +1,6 @@
 import numpy as np
-from scipy import optimize, stats
+from scipy import optimize, stats, integrate
+import mpmath as mpm
 
 
 def cholesky_from_svd(a: np.ndarray) -> np.ndarray:
@@ -24,7 +25,7 @@ def cholesky_from_svd(a: np.ndarray) -> np.ndarray:
     return r.T
 
 
-def black_price(K, T, F, vol, r=0.0, opttype=1):
+def black_price(K, T, F, vol, opttype=1):
     """
     Calculate the Black option price.
 
@@ -38,8 +39,6 @@ def black_price(K, T, F, vol, r=0.0, opttype=1):
         Forward price of the underlying asset.
     vol : float
         Volatility of the underlying asset.
-    r : float, optional
-        Risk-free interest rate. Default is 0.0.
     opttype : int, optional
         Option type: 1 for call options, -1 for put options. Default is 1.
 
@@ -51,10 +50,10 @@ def black_price(K, T, F, vol, r=0.0, opttype=1):
     w = T * vol**2
     d1 = np.log(F / K) / w**0.5 + 0.5 * w**0.5
     d2 = d1 - w**0.5
-    undiscounted_price = opttype * (
+    price = opttype * (
         F * stats.norm.cdf(opttype * d1) - K * stats.norm.cdf(opttype * d2)
     )
-    return np.exp(-r * T) * undiscounted_price
+    return price
 
 
 def black_vega(K, T, F, vol):
@@ -83,7 +82,7 @@ def black_vega(K, T, F, vol):
 
 
 @np.vectorize
-def black_impvol_brentq(K, T, F, value, r=0.0, opttype=1):
+def black_impvol_brentq(K, T, F, value, opttype=1):
     """
     Calculate the Black implied volatility using the Brent's method.
 
@@ -97,8 +96,6 @@ def black_impvol_brentq(K, T, F, value, r=0.0, opttype=1):
         Forward price of the underlying asset.
     value : float
         Observed market price of the option.
-    r : float, optional
-        Risk-free interest rate. Default is 0.0.
     opttype : int, optional
         Option type: 1 for call options, -1 for put options. Default is 1.
 
@@ -113,7 +110,7 @@ def black_impvol_brentq(K, T, F, value, r=0.0, opttype=1):
 
     try:
         result = optimize.root_scalar(
-            f=lambda vol: black_price(K, T, F, vol, r, opttype) - value,
+            f=lambda vol: black_price(K, T, F, vol, opttype) - value,
             bracket=[1e-10, 5.0],
             method="brentq",
         )
@@ -122,7 +119,7 @@ def black_impvol_brentq(K, T, F, value, r=0.0, opttype=1):
         return np.nan
 
 
-def black_impvol(K, T, F, value, r=0.0, opttype=1, TOL=1e-6, MAX_ITER=1000):
+def black_impvol(K, T, F, value, opttype=1, TOL=1e-6, MAX_ITER=1000):
     """
     Calculate the Black implied volatility using a bisection method.
 
@@ -136,8 +133,6 @@ def black_impvol(K, T, F, value, r=0.0, opttype=1, TOL=1e-6, MAX_ITER=1000):
         Forward price of the underlying asset.
     value : ndarray or float
         Observed market price(s) of the option(s).
-    r : float, optional
-        Risk-free interest rate. Default is 0.0.
     opttype : int or ndarray, optional
         Option type: 1 for call options, -1 for put options. Default is 1.
     TOL : float, optional
@@ -172,7 +167,6 @@ def black_impvol(K, T, F, value, r=0.0, opttype=1, TOL=1e-6, MAX_ITER=1000):
 
     F = float(F)
     T = float(T)
-    r = float(r)
 
     if T <= 0 or F <= 0:
         return np.full_like(K, np.nan)
@@ -181,7 +175,7 @@ def black_impvol(K, T, F, value, r=0.0, opttype=1, TOL=1e-6, MAX_ITER=1000):
     high = 5.0 * np.ones_like(K)
     mid = 0.5 * (low + high)
     for _ in range(MAX_ITER):
-        price = black_price(K, T, F, mid, r, opttype)
+        price = black_price(K, T, F, mid, opttype)
         diff = (price - value) / value
 
         if np.all(np.abs(diff) < TOL):
@@ -249,3 +243,130 @@ def black_otm_impvol_mc(S, k, T, mc_error=False):
         }
 
     return otm_impvol
+
+
+def kernel_rbergomi(t, s, H):
+    """Compute the kernel function in the rough Bergomi model."""
+    return np.sqrt(2.0 * H) * (t - s) ** (H - 0.5)
+
+
+def fourier(n, s):
+    """
+    Compute the first n Fourier basis functions evaluated at point s.
+
+    The basis consists of:
+        - 1 (constant term)
+        - sqrt(2) * sin(2 pi k s), sqrt(2) * cos(2 pi k s) for k = 1, 2, ...
+
+    Parameters
+    ----------
+    n : int
+        Number of Fourier basis functions to compute.
+    s : float
+        Point at which to evaluate the basis functions.
+
+    Returns
+    -------
+    np.ndarray
+        Array of shape (n,) containing the values of the first n Fourier basis
+        functions at s.
+    """
+    tab = np.zeros(n)
+    tab[0] = 1.0
+    for i in range(1, n):
+        tab[i] = (
+            np.cos(2.0 * np.pi * i * s) if i % 2 == 0 else np.sin(2.0 * np.pi * i * s)
+        )
+        tab[i] *= np.sqrt(2.0)
+    return tab
+
+
+def fourier_hat(N, t, H):
+    r"""
+    Compute the integrals of the rough Bergomi kernel times the Fourier basis functions.
+
+    For each k in 0,...,N-1, computes:
+        \int_0^t sqrt(2H) * (t-s)^{H-1/2} * e_k(s) ds,
+    where e_k(s) is the k-th Fourier basis function.
+
+    Parameters
+    ----------
+    N : int
+        Number of Fourier basis functions.
+    t : float
+        Upper limit of integration.
+    H : float
+        Hurst parameter.
+
+    Returns
+    -------
+    np.ndarray
+        Array of shape (N,) with the value of each integral for k = 0,...,N-1.
+    """
+    tab = np.zeros(N)
+    tab[0] = np.sqrt(2 * H) * t ** (H + 0.5) / (H + 0.5)
+    for i in range(1, N):
+        if i % 2 == 0:
+            # \int_0^t sqrt(2H) * (t-s)^{H-1/2} * sqrt(2) * cos(i*pi*s) ds
+            # tab[i] = integrate.quad(lambda s: kernel_rb(t, s, H) * np.sqrt(2) * np.cos(i * np.pi * s), 0.01, t)[0]
+            tab[i] = mpm.hyp1f2(
+                1, 0.75 + 0.5 * H, 1.25 + 0.5 * H, -((0.5 * i * np.pi * t) ** 2)
+            )
+            tab[i] *= (4.0 * np.sqrt(H) * t ** (H + 0.5)) / (1.0 + 2.0 * H)
+        else:
+            # \int_0^t sqrt(2H) * (t-s)^{H-1/2} * sqrt(2) * sin(i*pi*s) ds
+            # tab[i] = integrate.quad(lambda s: kernel_rb(t, s, H) * np.sqrt(2) * np.sin(i * np.pi * s), 0.01, t)[0]
+            tab[i] = mpm.hyp1f2(
+                1, 1.25 + 0.5 * H, 1.75 + 0.5 * H, -((0.5 * i * np.pi * t) ** 2)
+            )
+            tab[i] *= (16.0 * np.sqrt(H) * 0.5 * i * np.pi * t ** (1.5 + H)) / (
+                3 + 8 * H + 4 * H**2
+            )
+    return tab
+
+
+def objective_function(y, a, sigma_0, eta, H, rho):
+    # TODO: check again
+    """
+    Compute the rate function objective for the large deviations principle in
+    rough volatility models.
+
+    Parameters
+    ----------
+    y : float
+        Target value (e.g., log-moneyness).
+    a : np.ndarray
+        Array of Fourier coefficients (shape: n,).
+    sigma_0 : float
+        Initial volatility.
+    eta : float
+        Volatility of volatility parameter.
+    H : float
+        Hurst parameter.
+    rho : float
+        Correlation parameter.
+
+    Returns
+    -------
+    float
+        Value of the objective function.
+    """
+
+    def f_prime(t):
+        return np.dot(a, fourier(n=np.shape(a)[0], s=t))
+
+    def f_hat(t):
+        r"""
+        Compute \int_0^t kernel_rb(t, s, H) * f_prime(a, s) ds
+        """
+        return np.dot(a, fourier_hat(N=np.shape(a)[0], t=t, H=H))
+
+    def fsigma(x):
+        return sigma_0 * np.exp(0.5 * eta * x)
+
+    a = np.atleast_1d(a)
+    E = integrate.quad(lambda x: f_prime(x) ** 2, 0, 1)[0]
+    F = integrate.quad(lambda x: fsigma(f_hat(x)) ** 2, 0, 1)[0]
+    G = integrate.quad(lambda x: fsigma(f_hat(x)) * f_prime(x), 0, 1)[0]
+
+    return (y - rho * G) ** 2 / (2.0 * (1.0 - rho**2) * F) + 0.5 * E
