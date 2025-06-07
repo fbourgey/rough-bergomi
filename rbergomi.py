@@ -1,5 +1,5 @@
 import numpy as np
-from scipy import optimize, special, stats
+from scipy import optimize, special, stats, special
 import utils
 
 # add vix (rect/trap scheme) and weak approx
@@ -35,11 +35,11 @@ class RoughBergomi:
         Initialize the rough Bergomi model.
         See class docstring for parameter definitions.
         """
-        if self.H <= 0.0:
+        if H <= 0.0:
             raise ValueError("Hurst parameter H must be positive.")
-        if self.s0 <= 0.0:
+        if s0 <= 0.0:
             raise ValueError("Initial spot price s0 must be positive.")
-        if self.eta <= 0.0:
+        if eta <= 0.0:
             raise ValueError("Volatility of volatility eta must be positive.")
         if not (-1.0 <= rho <= 1.0):
             raise ValueError("Correlation rho must be in [-1, 1].")
@@ -585,6 +585,7 @@ class RoughBergomi:
         tab_a = np.zeros((np.shape(tab_y)[0], N))
         sigma_0 = self.xi0_0**0.5
         for i, y in enumerate(tab_y):
+            print("iteration", i + 1, "of", len(tab_y))
             a_guess = np.zeros(N)
             a_guess[0] = (
                 y * self.rho / sigma_0
@@ -606,3 +607,6 @@ class RoughBergomi:
             tab_rate[i] = optim.fun
 
         return tab_a, tab_rate
+
+    def simulate_vix(self):
+        raise NotImplementedError()

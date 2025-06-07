@@ -1,5 +1,5 @@
 import numpy as np
-from scipy import optimize, stats, integrate
+from scipy import optimize, stats, integrate, special
 import mpmath as mpm
 
 
@@ -250,19 +250,19 @@ def kernel_rbergomi(t, s, H):
     return np.sqrt(2.0 * H) * (t - s) ** (H - 0.5)
 
 
-def fourier(n, s):
+def fourier(n, t):
     """
     Compute the first n Fourier basis functions evaluated at point s.
 
     The basis consists of:
         - 1 (constant term)
-        - sqrt(2) * sin(2 pi k s), sqrt(2) * cos(2 pi k s) for k = 1, 2, ...
+        - sqrt(2) * sin(2 * pi * k * t), sqrt(2) * cos(2 * pi * k * t) for k = 1, 2, ...
 
     Parameters
     ----------
     n : int
         Number of Fourier basis functions to compute.
-    s : float
+    t : float
         Point at which to evaluate the basis functions.
 
     Returns
@@ -275,23 +275,23 @@ def fourier(n, s):
     tab[0] = 1.0
     for i in range(1, n):
         tab[i] = (
-            np.cos(2.0 * np.pi * i * s) if i % 2 == 0 else np.sin(2.0 * np.pi * i * s)
+            np.cos(2.0 * np.pi * i * t) if i % 2 == 0 else np.sin(2.0 * np.pi * i * t)
         )
         tab[i] *= np.sqrt(2.0)
     return tab
 
 
-def fourier_hat(N, t, H):
+def fourier_hat(n, t, H, n_quad=20):
     r"""
     Compute the integrals of the rough Bergomi kernel times the Fourier basis functions.
 
-    For each k in 0,...,N-1, computes:
+    For each k in 0,...,n-1, computes:
         \int_0^t sqrt(2H) * (t-s)^{H-1/2} * e_k(s) ds,
     where e_k(s) is the k-th Fourier basis function.
 
     Parameters
     ----------
-    N : int
+    n : int
         Number of Fourier basis functions.
     t : float
         Upper limit of integration.
@@ -301,31 +301,60 @@ def fourier_hat(N, t, H):
     Returns
     -------
     np.ndarray
-        Array of shape (N,) with the value of each integral for k = 0,...,N-1.
+        Array of shape (n,) with the value of each integral for k = 0,...,n-1.
     """
-    tab = np.zeros(N)
+    # we can use a gauss-jacobi quadrature rule for the integral
+
+    nodes, weights = special.roots_jacobi(n_quad, H - 0.5, 0)
+
+    tab = np.zeros(n)
     tab[0] = np.sqrt(2 * H) * t ** (H + 0.5) / (H + 0.5)
-    for i in range(1, N):
-        if i % 2 == 0:
-            # \int_0^t sqrt(2H) * (t-s)^{H-1/2} * sqrt(2) * cos(i*pi*s) ds
-            # tab[i] = integrate.quad(lambda s: kernel_rb(t, s, H) * np.sqrt(2) * np.cos(i * np.pi * s), 0.01, t)[0]
-            tab[i] = mpm.hyp1f2(
-                1, 0.75 + 0.5 * H, 1.25 + 0.5 * H, -((0.5 * i * np.pi * t) ** 2)
+    for i in range(1, n):
+        # if i % 2 == 0:
+        #     # \int_0^t sqrt(2H) * (t-s)^{H-1/2} * sqrt(2) * cos(i*pi*s) ds
+        #     # tab[i] = integrate.quad(
+        #     #     lambda s: kernel_rbergomi(t, s, H)
+        #     #     * np.sqrt(2)
+        #     #     * np.cos(2 * np.pi * i * s),
+        #     #     0.0,
+        #     #     t,
+        #     # )[0]
+        #     # tab[i] = mpm.hyp1f2(
+        #     #     1, 0.75 + 0.5 * H, 1.25 + 0.5 * H, -((0.5 * i * np.pi * t) ** 2)
+        #     # )
+        #     # tab[i] *= (4.0 * np.sqrt(H) * t ** (H + 0.5)) / (1.0 + 2.0 * H)
+        #     func = lambda s: np.sqrt(2 * np.pi) * np.sqrt(2) * np.cos(2 * np.pi * i * s)
+        # else:
+        #     # \int_0^t sqrt(2H) * (t-s)^{H-1/2} * sqrt(2) * sin(i*pi*s) ds
+        #     # tab[i] = integrate.quad(
+        #     #     lambda s: kernel_rbergomi(t, s, H)
+        #     #     * np.sqrt(2)
+        #     #     * np.sin(2 * np.pi * i * s),
+        #     #     0.0,
+        #     #     t,
+        #     # )[0]
+        #     # tab[i] = mpm.hyp1f2(
+        #     #     1, 1.25 + 0.5 * H, 1.75 + 0.5 * H, -((0.5 * i * np.pi * t) ** 2)
+        #     # )
+        #     # tab[i] *= (16.0 * np.sqrt(H) * 0.5 * i * np.pi * t ** (1.5 + H)) / (
+        #     #     3 + 8 * H + 4 * H**2
+        #     # )
+        #     func = lambda s: np.sqrt(2 * np.pi) * np.sqrt(2) * np.sin(2 * np.pi * i * s)
+        # tab[i] = (0.5 * t) ** (H + 0.5) * np.dot(weights, func(0.5 * t * (1 + nodes)))
+        alpha = H + 0.5
+        tab[i] = (
+            np.real(
+                np.exp(1j * 2 * np.pi * i * t)
+                * special.hyp1f1(alpha, alpha + 1, 1j * 2 * np.pi * i * t)
             )
-            tab[i] *= (4.0 * np.sqrt(H) * t ** (H + 0.5)) / (1.0 + 2.0 * H)
-        else:
-            # \int_0^t sqrt(2H) * (t-s)^{H-1/2} * sqrt(2) * sin(i*pi*s) ds
-            # tab[i] = integrate.quad(lambda s: kernel_rb(t, s, H) * np.sqrt(2) * np.sin(i * np.pi * s), 0.01, t)[0]
-            tab[i] = mpm.hyp1f2(
-                1, 1.25 + 0.5 * H, 1.75 + 0.5 * H, -((0.5 * i * np.pi * t) ** 2)
-            )
-            tab[i] *= (16.0 * np.sqrt(H) * 0.5 * i * np.pi * t ** (1.5 + H)) / (
-                3 + 8 * H + 4 * H**2
-            )
+            * t**alpha
+            / alpha
+        )
+        tab[i] *= np.sqrt(2 * np.pi) * np.sqrt(2)
     return tab
 
 
-def objective_function(y, a, sigma_0, eta, H, rho):
+def objective_function(a, y, sigma_0, eta, H, rho):
     # TODO: check again
     """
     Compute the rate function objective for the large deviations principle in
@@ -333,10 +362,10 @@ def objective_function(y, a, sigma_0, eta, H, rho):
 
     Parameters
     ----------
-    y : float
-        Target value (e.g., log-moneyness).
     a : np.ndarray
         Array of Fourier coefficients (shape: n,).
+    y : float
+        Target value (e.g., log-moneyness).
     sigma_0 : float
         Initial volatility.
     eta : float
@@ -351,22 +380,29 @@ def objective_function(y, a, sigma_0, eta, H, rho):
     float
         Value of the objective function.
     """
+    n = np.shape(a)[0]
 
-    def f_prime(t):
-        return np.dot(a, fourier(n=np.shape(a)[0], s=t))
-
-    def f_hat(t):
+    def h_fourier(t):
         r"""
-        Compute \int_0^t kernel_rb(t, s, H) * f_prime(a, s) ds
+        Compute the Fourier series expansion
+        h_fourier(a, t) = \sum_{k=0}^{n-1} a_k * e_k(t)
         """
-        return np.dot(a, fourier_hat(N=np.shape(a)[0], t=t, H=H))
+        return np.dot(a, fourier(n=n, t=t))
 
-    def fsigma(x):
+    def h_hat(t):
+        r"""
+        Compute \int_0^t kernel_rb(t, s, H) * h_prime(a, s) ds
+        """
+        return np.dot(a, fourier_hat(n=n, t=t, H=H))
+
+    def sigma(x):
         return sigma_0 * np.exp(0.5 * eta * x)
 
     a = np.atleast_1d(a)
-    E = integrate.quad(lambda x: f_prime(x) ** 2, 0, 1)[0]
-    F = integrate.quad(lambda x: fsigma(f_hat(x)) ** 2, 0, 1)[0]
-    G = integrate.quad(lambda x: fsigma(f_hat(x)) * f_prime(x), 0, 1)[0]
+    norm_h_fourier_squared = np.sum(a**2)
+    F = integrate.quad(lambda x: sigma(h_hat(x)) ** 2, 0, 1)[0]
+    G = integrate.quad(lambda x: sigma(h_hat(x)) * h_fourier(x), 0, 1)[0]
 
-    return (y - rho * G) ** 2 / (2.0 * (1.0 - rho**2) * F) + 0.5 * E
+    return (y - rho * G) ** 2 / (
+        2.0 * (1.0 - rho**2) * F
+    ) + 0.5 * norm_h_fourier_squared
