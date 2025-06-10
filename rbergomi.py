@@ -74,8 +74,13 @@ class RoughBergomi:
         r"""
         Compute the covariance matrix of Levy's fractional Brownian motion.
 
-        The process is defined as:
-            W_u^H = \int_0^u (u-s)^{H-1/2} dW_s
+        It corresponds to:
+
+        Cov(W_u^H, W_v^H) = \int_0^{min(u,v)} (u-s)^{H-1/2} (v-s)^{H-1/2} ds
+
+        where:
+
+        W_u^H = \int_0^u (u-s)^{H-1/2} dW_s
 
         Parameters
         ----------
@@ -154,19 +159,90 @@ class RoughBergomi:
 
         return chol
 
-    def cholesky_cov_matrix_vix(self, tab_t, return_cov: bool = False):
+    def covariance_levy_fbm_vix(self, T, u, v):
+        def func(x, y):
+            tmp1 = x ** (self.H + 0.5) * special.hyp2f1(
+                0.5 - self.H, 0.5 + self.H, 1.5 + self.H, -x / (y - x)
+            )
+            tmp2 = (x - T) ** (self.H + 0.5) * special.hyp2f1(
+                0.5 - self.H, 0.5 + self.H, 1.5 + self.H, -(x - T) / (y - x)
+            )
+            return (
+                (y - x) ** (self.H - 0.5)
+                * (tmp1 - tmp2)
+                * 2.0
+                * self.H
+                / (self.H + 0.5)
+            )
+
+        cov = np.zeros_like(u)
+        cov[u == v] = u[u == v] ** (2.0 * self.H) - (u[u == v] - T) ** (2.0 * self.H)
+        cov[u < v] = func(u[u < v], v[u < v])
+        cov[u > v] = func(v[u > v], u[u > v])
+        return cov
+
+        # cov = np.where(
+        #     u == v,
+        #     u ** (2.0 * self.H) - (u - T) ** (2.0 * self.H),
+        #     2.0
+        #     * self.H
+        #     * np.where(
+        #         v > u,
+        #         (v - u) ** (self.H - 0.5)
+        #         * (
+        #             u ** (self.H + 0.5)
+        #             * special.hyp2f1(
+        #                 0.5 - self.H,
+        #                 0.5 + self.H,
+        #                 1.5 + self.H,
+        #                 -u / (v - u),
+        #             )
+        #             - (u - T) ** (self.H + 0.5)
+        #             * special.hyp2f1(
+        #                 0.5 - self.H,
+        #                 0.5 + self.H,
+        #                 1.5 + self.H,
+        #                 -(u - T) / (v - u),
+        #             )
+        #         )
+        #         / (self.H + 0.5),
+        #         (u - v) ** (self.H - 0.5)
+        #         * (
+        #             v ** (self.H + 0.5)
+        #             * special.hyp2f1(
+        #                 0.5 - self.H,
+        #                 0.5 + self.H,
+        #                 1.5 + self.H,
+        #                 -v / (u - v),
+        #             )
+        #             - (v - T) ** (self.H + 0.5)
+        #             * special.hyp2f1(
+        #                 0.5 - self.H,
+        #                 0.5 + self.H,
+        #                 1.5 + self.H,
+        #                 -(v - T) / (u - v),
+        #             )
+        #         )
+        #         / (self.H + 0.5),
+        #     ),
+        # )
+        return np.real(cov)
+
+    def cholesky_cov_matrix_vix(self, T: float, n_disc: int, return_cov: bool = False):
         r"""
         Compute the lower-triangular Cholesky factor of the covariance matrix of the
-        Gaussian vector (Y_{t_i}) for 1 <= i <= n, where t_i are the timesteps in
-        tab_t = [T, T+delta] and delta = 30 / 365 (30 days in years).
+        Gaussian vector (Y_{T}^{u_i}) for 0 <= i <= n, where u_i = T + delta * i / n
+        and delta = 30 / 365 (30 days in years).
 
         Here, W is a standard Brownion motion and
-        Y_t = \sqrt{2H} \int_0^t (t-s)^{H-1/2} dW_s.
+        Y_T^u = \sqrt{2H} \int_0^T (u-s)^{H-1/2} dW_s, for any u >= T.
 
         Parameters
         ----------
-        tab_t : np.ndarray
-            Array of time grid points (shape: n_steps + 1,).
+        T : float
+            Maturity of interest.
+        n_disc : int
+            Number of time discretization steps (must be positive).
         return_cov : bool, optional
             If True, return the full covariance matrix instead of its Cholesky factor.
             Default is False.
@@ -178,53 +254,12 @@ class RoughBergomi:
             matrix itself if `return_cov` is True.
         """
         # TODO: simplify
-        n_disc = tab_t.shape[0] - 1
-        T = tab_t[0]
-        u = np.tile(tab_t[1:], (n_disc, 1)).T
+        tab_u = np.linspace(T, T + self.delta_vix, n_disc + 1)
+        u = np.tile(tab_u, (n_disc + 1, 1)).T
         v = u.T
-        cov = np.where(
-            u == v,
-            u ** (2.0 * self.H) - (u - T) ** (2.0 * self.H),
-            np.where(
-                v > u,
-                (v - u) ** (self.H - 0.5)
-                * (
-                    u ** (self.H + 0.5)
-                    * special.hyp2f1(
-                        0.5 - self.H,
-                        0.5 + self.H,
-                        1.5 + self.H,
-                        -u / (v - u),
-                    )
-                    - (u - T) ** (self.H + 0.5)
-                    * special.hyp2f1(
-                        0.5 - self.H,
-                        0.5 + self.H,
-                        1.5 + self.H,
-                        -(u - T) / (v - u),
-                    )
-                )
-                / (self.H + 0.5),
-                (u - v) ** (self.H - 0.5)
-                * (
-                    v ** (self.H + 0.5)
-                    * special.hyp2f1(
-                        0.5 - self.H,
-                        0.5 + self.H,
-                        1.5 + self.H,
-                        -v / (u - v),
-                    )
-                    - (v - T) ** (self.H + 0.5)
-                    * special.hyp2f1(
-                        0.5 - self.H,
-                        0.5 + self.H,
-                        1.5 + self.H,
-                        -(v - T) / (u - v),
-                    )
-                )
-                / (self.H + 0.5),
-            ),
-        )
+
+        cov = self.covariance_levy_fbm_vix(T=T, u=u, v=v)
+
         if return_cov:
             return cov
         try:
@@ -784,7 +819,7 @@ class RoughBergomi:
         nodes, weights = utils.gauss_legendre(0, 1, n_quad)
         return np.sum(weights * self.xi0(T + self.delta_vix * nodes))
 
-    def simulate_vix(self, tab_u, n_mc, rule="left", seed=None):
+    def simulate_vix(self, T: float, n_mc: int, n_disc: int, rule="left", seed=None):
         """
         tab_u : np.ndarray
             Array of time grid points [T,T+delta] for the VIX simulation
@@ -796,9 +831,10 @@ class RoughBergomi:
         if rule not in ["left", "right", "trap"]:
             raise ValueError("rule must be one of 'left', 'right', or 'trap'.")
 
+        tab_u = np.linspace(T, T + self.delta_vix, n_disc + 1)
         n_disc = tab_u.shape[0] - 1
         du = tab_u[1] - tab_u[0]
-        y = self.cholesky_cov_matrix_vix(tab_u) @ np.random.randn(n_disc + 1, n_mc)
+        y = self.cholesky_cov_matrix_vix(T, n_disc) @ np.random.randn(n_disc + 1, n_mc)
         var_y = tab_u ** (2.0 * self.H) - (tab_u - tab_u[0]) ** (2.0 * self.H)
         xi = self.xi0(tab_u[:, None]) * np.exp(
             self.eta * y - 0.5 * self.eta**2 * var_y[:, None]
@@ -818,8 +854,7 @@ class RoughBergomi:
         Compute the implied volatility of the VIX at a given log-moneyness by Monte
         Carlo simulation.
         """
-        tab_u = np.linspace(T, T + 30 / 365, n_disc + 1)
-        vix = self.simulate_vix(tab_u=tab_u, n_mc=n_mc, rule=rule, seed=seed)
+        vix = self.simulate_vix(T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed)
         return utils.black_otm_impvol_mc(S=vix, k=k, T=T)
 
     def implied_vol_vix_approx(self):
@@ -895,22 +930,24 @@ class RoughBergomi:
         """
         # TODO: clean
         var0 = (
-            pow(T + self.delta_vix, 2.0 * self.H + 2.0)
-            + pow(T, 2 * self.H + 2)
-            - pow(self.delta_vix, 2 * self.H + 2)
+            (T + self.delta_vix) ** (2.0 * self.H + 2.0)
+            + T ** (2 * self.H + 2)
+            - self.delta_vix ** (2 * self.H + 2)
         ) / (2 * self.H + 2)
         var1 = (
             2
-            * pow(self.delta_vix, self.H + 1 / 2)
-            * pow(T, self.H + 3 / 2)
+            * self.delta_vix ** (self.H + 1 / 2)
+            * T ** (self.H + 3 / 2)
             * special.beta(1, self.H + 3 / 2)
             * special.hyp2f1(
                 -self.H - 1 / 2, self.H + 3 / 2, self.H + 5 / 2, -T / self.delta_vix
             )
         )
-        var = pow(
-            self.eta * np.sqrt(2.0 * self.H) / (self.delta_vix * (self.H + 1 / 2)), 2
+        var = (
+            (self.eta * np.sqrt(2.0 * self.H) / (self.delta_vix * (self.H + 1 / 2)))
+            ** 2
         ) * (var0 - var1)
+
         return var
 
     def gamma_1_proxy(self, T, n_quad=20):
@@ -949,7 +986,8 @@ class RoughBergomi:
                 v_weights[None, :]
                 * self.kernel(
                     u=T + self.delta_vix * v_nodes[:, None], t=T * v_nodes[None, :]
-                ),
+                )
+                - int_kernel_squared[None, :],
                 axis=1,
             )
             ** 2
@@ -1016,11 +1054,66 @@ class RoughBergomi:
 
         return gamma10(T) + gamma11(T)
 
-    def gamma_2_proxy(self):
+    def gamma_2_proxy(self, T, n_quad=20):
         """
         Compute the second-order gamma coefficient of the VIX proxy.
         """
-        raise NotImplementedError()
+        v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
+        fvix2 = self.fut_vix2(T=T, n_quad=n_quad)
+        int_kernel_squared = (
+            np.sum(
+                v_weights[None, :]
+                * self.xi0(T + self.delta_vix * v_nodes[None, :])
+                * self.kernel(
+                    u=T + self.delta_vix * v_nodes[None, :], t=T * v_nodes[:, None]
+                )
+                ** 2,
+                axis=1,
+            )
+            / fvix2
+        )
+        int_kernel = (
+            np.sum(
+                v_weights[None, :]
+                * self.xi0(T + self.delta_vix * v_nodes[None, :])
+                * self.kernel(
+                    u=T + self.delta_vix * v_nodes[None, :], t=T * v_nodes[:, None]
+                ),
+                axis=1,
+            )
+            / fvix2
+        )
+        integrand = np.sum(
+            v_weights[None, :]
+            * int_kernel[None, :]
+            * (
+                self.kernel(
+                    u=T + self.delta_vix * v_nodes[:, None], t=T * v_nodes[None, :]
+                )
+                - int_kernel[None, :]
+            ),
+            axis=1,
+        )
+        integrand *= np.sum(
+            v_weights[None, :]
+            * int_kernel[None, :]
+            * (
+                self.kernel(
+                    u=T + self.delta_vix * v_nodes[:, None], t=T * v_nodes[None, :]
+                )
+                ** 2
+                - int_kernel_squared[None, :]
+            ),
+            axis=1,
+        )
+        gamma_2 = (
+            -0.5
+            * T**2
+            * np.sum(v_weights * self.xi0(T + self.delta_vix * v_nodes) * integrand)
+            / fvix2
+        )
+
+        return gamma_2
 
     def gamma_2_proxy_flat(self, T):
         """
@@ -1039,12 +1132,7 @@ class RoughBergomi:
             return tmp0 * tmp1
 
         tmp0 = -(T * pow(eta, 4)) / (4 * self.delta_vix * (self.H + 1 / 2) * self.H)
-        gamma21 = (
-            tmp0
-            * integrate.dblquad(
-                g2, 0, 1, lambda a: 0, lambda a: 1, args=(self.delta_vix, T, self.H)
-            )[0]
-        )
+        gamma21 = tmp0 * integrate.dblquad(g2, 0, 1, lambda a: 0, lambda a: 1)[0]
         gamma22 = (
             pow(eta, 2)
             * (
@@ -1056,11 +1144,41 @@ class RoughBergomi:
         ) / (4 * self.H * (2 * self.H + 1) * self.delta_vix)
         return gamma21 + gamma22
 
-    def gamma_3_proxy(self):
+    def gamma_3_proxy(self, T, n_quad=20):
         """
         Compute the third-order gamma coefficient of the VIX proxy.
         """
-        raise NotImplementedError()
+        v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
+        fvix2 = self.fut_vix2(T=T, n_quad=n_quad)
+        int_kernel = (
+            np.sum(
+                v_weights[None, :]
+                * self.xi0(T + self.delta_vix * v_nodes[None, :])
+                * self.kernel(
+                    u=T + self.delta_vix * v_nodes[None, :], t=T * v_nodes[:, None]
+                ),
+                axis=1,
+            )
+            / fvix2
+        )
+        integrand = (
+            np.sum(
+                v_weights[None, :]
+                * int_kernel[None, :]
+                * self.kernel(
+                    u=T + self.delta_vix * v_nodes[:, None], t=T + v_nodes[None, :]
+                ),
+                axis=1,
+            )
+            ** 2
+        )
+        gamma_3 = (
+            0.5
+            * T**2
+            * np.sum(v_weights * self.xi0(T + self.delta_vix * v_nodes) * integrand)
+            / fvix2
+        )
+        return gamma_3
 
     def gamma_3_proxy_flat(self, T):
         """
