@@ -1,9 +1,11 @@
 import numpy as np
-from scipy import optimize, special, stats, special
+from scipy import optimize, special, stats, integrate
 import utils
+from typing import Callable
 
 # add vix (rect/trap scheme) and weak approx
 # add tests
+# add a param to check if xi0 is flat or not
 
 
 class RoughBergomi:
@@ -30,7 +32,14 @@ class RoughBergomi:
     Quantitative Finance, 16(6), 887-904.
     """
 
-    def __init__(self, s0, xi0, H, eta, rho):
+    def __init__(
+        self,
+        s0: float,
+        xi0: Callable[[np.ndarray], np.ndarray],
+        H: float,
+        eta: float,
+        rho: float,
+    ) -> None:
         """
         Initialize the rough Bergomi model.
         See class docstring for parameter definitions.
@@ -45,15 +54,21 @@ class RoughBergomi:
             raise ValueError("Correlation rho must be in [-1, 1].")
         if not callable(xi0):
             raise ValueError("xi0 must be a callable function.")
-        if not np.all(xi0(np.linspace(1e-10, 10, 1000)) > 0):
+        if not np.all(xi0(np.linspace(1e-10, 10, 1000)) > np.array([0.0])):
             raise ValueError("xi0 must be positive for all t >= 0.")
 
         self.s0 = s0
         self.xi0 = xi0
-        self.xi0_0 = self.xi0(0.0)
+        self.xi0_0 = self.xi0(np.zeros(1))[0]
+        self.xi0_flat = self._is_xi0_flat()
         self.H = H
         self.eta = eta
         self.rho = rho
+        self.delta_vix = 30.0 / 365.0
+
+    def _is_xi0_flat(self) -> bool:
+        """Check if the forward variance curve xi0 is flat."""
+        return np.allclose(self.xi0(np.linspace(1e-10, 10, 1000)), self.xi0_0)
 
     def cov_levy_fbm(self, u, v):
         r"""
@@ -91,7 +106,7 @@ class RoughBergomi:
         of the covariance matrix of the Gaussian vector (Y_{t_i}, W_{t_i})
         for 1 <= i <= n, where t_i are the timesteps in tab_t.
 
-        Here W a standard Brownion motion and
+        Here, W is a standard Brownion motion and
         Y_t = \sqrt{2H} \int_0^t (t-s)^{H-1/2} dW_s.
 
         Parameters
@@ -126,6 +141,89 @@ class RoughBergomi:
                 [cov_y, cov_yw],
                 [cov_yw.T, cov_w],
             ]
+        )
+        if return_cov:
+            return cov
+        try:
+            chol = np.linalg.cholesky(cov)
+        except np.linalg.LinAlgError:
+            chol = utils.cholesky_from_svd(cov)
+        except Exception as e:
+            print(f"Error in Cholesky decomposition: {e}")
+            raise
+
+        return chol
+
+    def cholesky_cov_matrix_vix(self, tab_t, return_cov: bool = False):
+        r"""
+        Compute the lower-triangular Cholesky factor of the covariance matrix of the
+        Gaussian vector (Y_{t_i}) for 1 <= i <= n, where t_i are the timesteps in
+        tab_t = [T, T+delta] and delta = 30 / 365 (30 days in years).
+
+        Here, W is a standard Brownion motion and
+        Y_t = \sqrt{2H} \int_0^t (t-s)^{H-1/2} dW_s.
+
+        Parameters
+        ----------
+        tab_t : np.ndarray
+            Array of time grid points (shape: n_steps + 1,).
+        return_cov : bool, optional
+            If True, return the full covariance matrix instead of its Cholesky factor.
+            Default is False.
+
+        Returns
+        -------
+        np.ndarray
+            Lower-triangular Cholesky factor of the covariance matrix, or the covariance
+            matrix itself if `return_cov` is True.
+        """
+        # TODO: simplify
+        n_disc = tab_t.shape[0] - 1
+        T = tab_t[0]
+        u = np.tile(tab_t[1:], (n_disc, 1)).T
+        v = u.T
+        cov = np.where(
+            u == v,
+            u ** (2.0 * self.H) - (u - T) ** (2.0 * self.H),
+            np.where(
+                v > u,
+                (v - u) ** (self.H - 0.5)
+                * (
+                    u ** (self.H + 0.5)
+                    * special.hyp2f1(
+                        0.5 - self.H,
+                        0.5 + self.H,
+                        1.5 + self.H,
+                        -u / (v - u),
+                    )
+                    - (u - T) ** (self.H + 0.5)
+                    * special.hyp2f1(
+                        0.5 - self.H,
+                        0.5 + self.H,
+                        1.5 + self.H,
+                        -(u - T) / (v - u),
+                    )
+                )
+                / (self.H + 0.5),
+                (u - v) ** (self.H - 0.5)
+                * (
+                    v ** (self.H + 0.5)
+                    * special.hyp2f1(
+                        0.5 - self.H,
+                        0.5 + self.H,
+                        1.5 + self.H,
+                        -v / (u - v),
+                    )
+                    - (v - T) ** (self.H + 0.5)
+                    * special.hyp2f1(
+                        0.5 - self.H,
+                        0.5 + self.H,
+                        1.5 + self.H,
+                        -(v - T) / (u - v),
+                    )
+                )
+                / (self.H + 0.5),
+            ),
         )
         if return_cov:
             return cov
@@ -598,9 +696,7 @@ class RoughBergomi:
                 * ((self.rho**2 + 1) * 0.65 - 3.0 * self.rho**2 / (self.H + 1.5))
             )
             optim = optimize.minimize(
-                lambda a: utils.objective_function(
-                    a=a, y=y, sigma_0=sigma_0, eta=self.eta, H=self.H, rho=self.rho
-                ),
+                lambda a, y=y: self.objective_function(a=a, y=y),
                 x0=a_guess,
             )
             tab_a[i, :] = optim.x
@@ -608,5 +704,405 @@ class RoughBergomi:
 
         return tab_a, tab_rate
 
-    def simulate_vix(self):
+    def kernel_fourier_integrals(self, n, t):
+        r"""
+        Compute the integrals of the rough Bergomi kernel times the Fourier basis
+        functions.
+
+        For each k in 0,...,n-1, computes:
+            \int_0^t sqrt(2H) * (t-s)^{H-1/2} * e_k(s) ds,
+        where e_k(s) is the k-th Fourier basis function.
+
+        Parameters
+        ----------
+        n : int
+            Number of Fourier basis functions.
+        t : float
+            Upper limit of integration.
+
+        Returns
+        -------
+        np.ndarray
+            Array of shape (n,) with the value of each integral for k = 0,...,n-1.
+        """
+        alpha = self.H + 0.5
+        range_n = np.arange(n)
+        k = 2 * np.pi * range_n
+        return np.real(
+            np.exp(1j * k * t)
+            * special.hyp1f1(alpha, alpha + 1, 1j * k * t)
+            * t**alpha
+            / alpha
+        )
+
+    def objective_function(self, a, y):
+        """
+        Compute the rate function objective for the large deviations principle in
+        rough volatility models.
+
+        Parameters
+        ----------
+        a : np.ndarray
+            Array of Fourier coefficients (shape: n,).
+        y : float
+            Target value (e.g., log-moneyness).
+
+        Returns
+        -------
+        float
+            Value of the objective function.
+        """
+        n = np.shape(a)[0]
+
+        def h_fourier(t):
+            r"""
+            Compute the Fourier series expansion
+            h_fourier(a, t) = \sum_{k=0}^{n-1} a_k * e_k(t)
+            """
+            return np.dot(a, utils.fourier(n=n, t=t))
+
+        def h_hat(t):
+            r"""
+            Compute \int_0^t kernel_rb(t, s, H) * h_prime(a, s) ds
+            """
+            return np.dot(a, self.kernel_fourier_integrals(n=n, t=t))
+
+        def sigma(x):
+            return self.xi0_0 * np.exp(0.5 * self.eta * x)
+
+        a = np.atleast_1d(a)
+        norm_h_fourier_squared = np.sum(a**2)
+        F = integrate.quad(lambda x: sigma(h_hat(x)) ** 2, 0, 1)[0]
+        G = integrate.quad(lambda x: sigma(h_hat(x)) * h_fourier(x), 0, 1)[0]
+
+        return (y - self.rho * G) ** 2 / (
+            2.0 * (1.0 - self.rho**2) * F
+        ) + 0.5 * norm_h_fourier_squared
+
+    def fut_vix2(self, T, n_quad=20):
+        r"""Compute E[VIX_T^2] = 1/delta \int_{T}^{T+delta} \xi_0^u du"""
+        nodes, weights = utils.gauss_legendre(0, 1, n_quad)
+        return np.sum(weights * self.xi0(T + self.delta_vix * nodes))
+
+    def simulate_vix(self, tab_u, n_mc, rule="left", seed=None):
+        """
+        tab_u : np.ndarray
+            Array of time grid points [T,T+delta] for the VIX simulation
+            (shape: n_steps + 1,).
+        """
+        if seed is not None:
+            np.random.seed(seed)
+
+        if rule not in ["left", "right", "trap"]:
+            raise ValueError("rule must be one of 'left', 'right', or 'trap'.")
+
+        n_disc = tab_u.shape[0] - 1
+        du = tab_u[1] - tab_u[0]
+        y = self.cholesky_cov_matrix_vix(tab_u) @ np.random.randn(n_disc + 1, n_mc)
+        var_y = tab_u ** (2.0 * self.H) - (tab_u - tab_u[0]) ** (2.0 * self.H)
+        xi = self.xi0(tab_u[:, None]) * np.exp(
+            self.eta * y - 0.5 * self.eta**2 * var_y[:, None]
+        )
+
+        if rule == "left":
+            return np.sqrt(xi[:-1, :].mean(axis=0) * du)
+        elif rule == "right":
+            return np.sqrt(xi[1:, :].mean(axis=0) * du)
+        elif rule == "trap":
+            return np.sqrt(
+                0.5 * (xi[:-1, :].mean(axis=0) + xi[1:, :].mean(axis=0)) * du
+            )
+
+    def implied_vol_vix(self, k, T, n_mc, n_disc, rule="trap", seed=None):
+        """
+        Compute the implied volatility of the VIX at a given log-moneyness by Monte
+        Carlo simulation.
+        """
+        tab_u = np.linspace(T, T + 30 / 365, n_disc + 1)
+        vix = self.simulate_vix(tab_u=tab_u, n_mc=n_mc, rule=rule, seed=seed)
+        return utils.black_otm_impvol_mc(S=vix, k=k, T=T)
+
+    def implied_vol_vix_approx(self):
+        pass
+
+    def kernel(self, u, t):
+        return self.eta * np.sqrt(2.0 * self.H) * (u - t) ** (self.H - 0.5)
+
+    def mean_proxy(self, T, n_quad=20):
+        r"""
+        Compute the mean of the VIX proxy.
+
+        It is defined as:
+
+        -1/2 * \int_0^T {
+            1/delta * \int_{T}^{T+delta} \xi_0(u) * kernel(u, t)^2 du / F_{VIX^2}
+        } dt
+
+        where F_{VIX^2} is the price of the VIX^2 futures contract at time T.
+        """
+        v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
+        mean = -0.5 * T / self.fut_vix2(T, n_quad=n_quad)
+        mean *= np.mean(
+            v_weights[:, None]
+            * v_weights[None, :]
+            * self.xi0(T + self.delta_vix * v_nodes[None, :])
+            * self.kernel(
+                u=T + self.delta_vix * v_nodes[None, :], t=T * v_nodes[:, None]
+            )
+            ** 2
+        )
+        return mean
+
+    def mean_proxy_flat(self, T):
+        """
+        Compute the mean of the VIX proxy when xi0 is flat.
+        """
+        mean = (
+            (T + self.delta_vix) ** (2.0 * self.H + 1.0)
+            - self.delta_vix ** (2.0 * self.H + 1.0)
+            - T ** (2.0 * self.H + 1.0)
+        )
+        mean *= -(self.eta**2) / (2.0 * self.delta_vix * (2.0 * self.H + 1.0))
+        return mean
+
+    def var_proxy(self, T, n_quad=20):
+        r"""
+        Compute the variance of the VIX proxy.
+
+        It is defined as:
+
+        \int_0^T {
+            1/delta * \int_{T}^{T+delta} \xi_0(u) * kernel(u, t)^2 du / F_{VIX^2}
+        }^2 dt
+
+        where F_{VIX^2} is the price of the VIX^2 futures contract at time T.
+        """
+        v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
+        inner = np.sum(
+            v_weights[None, :]
+            * self.xi0(T + self.delta_vix * v_nodes[None, :])
+            * self.kernel(
+                u=T + self.delta_vix * v_nodes[None, :], t=T * v_nodes[:, None]
+            )
+            ** 2,
+            axis=1,
+        ) / self.fut_vix2(T, n_quad)
+        return T * np.sum(v_weights * inner**2)
+
+    def var_proxy_flat(self, T):
+        """
+        Compute the variance of the VIX proxy when xi0 is flat.
+        """
+        # TODO: clean
+        var0 = (
+            pow(T + self.delta_vix, 2.0 * self.H + 2.0)
+            + pow(T, 2 * self.H + 2)
+            - pow(self.delta_vix, 2 * self.H + 2)
+        ) / (2 * self.H + 2)
+        var1 = (
+            2
+            * pow(self.delta_vix, self.H + 1 / 2)
+            * pow(T, self.H + 3 / 2)
+            * special.beta(1, self.H + 3 / 2)
+            * special.hyp2f1(
+                -self.H - 1 / 2, self.H + 3 / 2, self.H + 5 / 2, -T / self.delta_vix
+            )
+        )
+        var = pow(
+            self.eta * np.sqrt(2.0 * self.H) / (self.delta_vix * (self.H + 1 / 2)), 2
+        ) * (var0 - var1)
+        return var
+
+    def gamma_1_proxy(self, T, n_quad=20):
+        """
+        Compute the first-order gamma coefficient of the VIX proxy.
+        """
+        v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
+        fvix2 = self.fut_vix2(T=T, n_quad=n_quad)
+        int_kernel_squared = (
+            np.sum(
+                v_weights[None, :]
+                * self.xi0(T + self.delta_vix * v_nodes[None, :])
+                * self.kernel(
+                    u=T + self.delta_vix * v_nodes[None, :], t=T * v_nodes[:, None]
+                )
+                ** 2,
+                axis=1,
+            )
+            / fvix2
+        )
+        int_kernel = (
+            np.sum(
+                v_weights[None, :]
+                * self.xi0(T + self.delta_vix * v_nodes[None, :])
+                * self.kernel(
+                    u=T + self.delta_vix * v_nodes[None, :], t=T * v_nodes[:, None]
+                ),
+                axis=1,
+            )
+            / fvix2
+        )
+        integrand = (
+            0.125
+            * T**2
+            * np.sum(
+                v_weights[None, :]
+                * self.kernel(
+                    u=T + self.delta_vix * v_nodes[:, None], t=T * v_nodes[None, :]
+                ),
+                axis=1,
+            )
+            ** 2
+        )
+        integrand += (
+            0.5
+            * T
+            * np.sum(
+                v_weights[None, :]
+                * (
+                    self.kernel(
+                        u=T + self.delta_vix * v_nodes[:, None], t=T * v_nodes[None, :]
+                    )
+                    - int_kernel[None, :]
+                )
+                ** 2,
+                axis=1,
+            )
+        )
+        gamma_1 = (
+            np.sum(v_weights * self.xi0(T + self.delta_vix * v_nodes) * integrand)
+            / fvix2
+        )
+
+        return gamma_1
+
+    def gamma_1_proxy_flat(self, T):
+        """
+        Compute the first-order gamma coefficient of the VIX proxy when xi0 is flat.
+        """
+        eta = self.eta * np.sqrt(2.0 * self.H)
+
+        def gamma10(T):
+            tmp0 = (
+                (T + self.delta_vix) ** (4 * self.H + 1)
+                + self.delta_vix ** (4 * self.H + 1)
+                - T ** (4 * self.H + 1)
+            ) / ((4 * self.H + 1) * self.delta_vix)
+            tmp1 = (
+                T ** (2 * self.H + 1)
+                + self.delta_vix ** (2 * self.H + 1)
+                - (T + self.delta_vix) ** (2 * self.H + 1)
+            ) / (self.delta_vix * (2 * self.H + 1))
+            tmp1 = -(tmp1**2)
+            tmp2 = (
+                -2
+                * T ** (2 * self.H)
+                * self.delta_vix ** (2 * self.H)
+                * special.beta(1, 2 * self.H + 1)
+                * special.hyp2f1(
+                    -2 * self.H, 2 * self.H + 1, 2 * self.H + 2, -self.delta_vix / T
+                )
+            )
+            tmp3 = ((eta**4) / (32.0 * (self.H**2))) * (tmp0 + tmp1 + tmp2)
+            return tmp3
+
+        def gamma11(T):
+            tmp = ((eta**2) / (4 * self.H * (2 * self.H + 1) * self.delta_vix)) * (
+                (T + self.delta_vix) ** (2 * self.H + 1)
+                - T ** (2 * self.H + 1)
+                - self.delta_vix ** (2 * self.H + 1)
+            )
+            return tmp - 0.5 * self.var_proxy(T)
+
+        return gamma10(T) + gamma11(T)
+
+    def gamma_2_proxy(self):
+        """
+        Compute the second-order gamma coefficient of the VIX proxy.
+        """
         raise NotImplementedError()
+
+    def gamma_2_proxy_flat(self, T):
+        """
+        Compute the second-order gamma coefficient of the VIX proxy when xi0 is flat.
+        """
+        eta = self.eta * np.sqrt(2.0 * self.H)
+
+        def g2(t, a):
+            tmp0 = (
+                pow(T * t + self.delta_vix, self.H + 1 / 2) - pow(T * t, self.H + 1 / 2)
+            ) * (
+                pow(T + a * self.delta_vix, 2 * self.H)
+                - pow(a * self.delta_vix, 2 * self.H)
+            )
+            tmp1 = pow(T * t + a * self.delta_vix, self.H - 1 / 2)
+            return tmp0 * tmp1
+
+        tmp0 = -(T * pow(eta, 4)) / (4 * self.delta_vix * (self.H + 1 / 2) * self.H)
+        gamma21 = (
+            tmp0
+            * integrate.dblquad(
+                g2, 0, 1, lambda a: 0, lambda a: 1, args=(self.delta_vix, T, self.H)
+            )[0]
+        )
+        gamma22 = (
+            pow(eta, 2)
+            * (
+                pow(T + self.delta_vix, 2 * self.H + 1)
+                - pow(T, 2 * self.H + 1)
+                - pow(self.delta_vix, 2 * self.H + 1)
+            )
+            * self.var_proxy(T)
+        ) / (4 * self.H * (2 * self.H + 1) * self.delta_vix)
+        return gamma21 + gamma22
+
+    def gamma_3_proxy(self):
+        """
+        Compute the third-order gamma coefficient of the VIX proxy.
+        """
+        raise NotImplementedError()
+
+    def gamma_3_proxy_flat(self, T):
+        """
+        Compute the third-order gamma coefficient of the VIX proxy when xi0 is flat.
+        """
+        eta = self.eta * np.sqrt(2.0 * self.H)
+
+        def g3(t, a):
+            d = self.delta_vix / T
+            tmp0 = (
+                special.beta(1, self.H + 1.5)
+                * pow(a * d, self.H - 1 / 2)
+                * special.hyp2f1(
+                    -self.H + 1 / 2, self.H + 3 / 2, self.H + 5 / 2, -1 / (a * d)
+                )
+            )
+            tmp1 = pow(1 + a * d, self.H + 1 / 2) * special.hyp2f1(
+                -self.H - 1 / 2,
+                self.H + 1 / 2,
+                self.H + 3 / 2,
+                -(1 + a * d) / (d - a * d),
+            )
+            tmp2 = pow(a * d, self.H + 1 / 2) * special.hyp2f1(
+                -self.H - 1 / 2, self.H + 1 / 2, self.H + 3 / 2, -(a * d) / (d - a * d)
+            )
+            tmp3 = (
+                pow(1 - a, self.H + 1 / 2)
+                * pow(d, self.H + 1 / 2)
+                * special.beta(1, self.H + 1 / 2)
+                * (tmp1 - tmp2)
+            )
+            tmps = tmp3 - tmp0
+            return (
+                pow(T, 4 * self.H)
+                * (pow(t + d, self.H + 1 / 2) - pow(t, self.H + 1 / 2))
+                * pow(t + a * d, self.H - 1 / 2)
+                * tmps
+            )
+
+        tmp0 = (pow(eta, 4) * pow(T, 2)) / (
+            2 * pow(self.delta_vix, 2) * pow(self.H + 1 / 2, 2)
+        )
+        gamma31 = tmp0 * integrate.dblquad(g3, 0, 1, lambda x: 0, lambda x: 1)[0]
+
+        return gamma31 - 0.5 * pow(self.var_proxy(T), 2)
