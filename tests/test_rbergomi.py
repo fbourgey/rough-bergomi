@@ -70,18 +70,55 @@ class TestRoughBergomi:
         v = u.T
 
         cov_quad = np.zeros_like(u)
+
+        def integrand(s, ui, vi):
+            return 2.0 * H * ((ui - s) * (vi - s)) ** (H - 0.5)
+
         for i in range(n_disc + 1):
             for j in range(n_disc + 1):
-                integral = integrate.quad(
-                    lambda s: 2.0 * H * ((tab_u[i] - s) * (tab_u[j] - s)) ** (H - 0.5),
-                    0.0,
-                    T,
-                )[0]
-                cov_quad[i, j] = integral
+                cov_quad[i, j], _ = integrate.quad(
+                    integrand, 0.0, T, args=(tab_u[i], tab_u[j])
+                )
 
+        assert np.allclose(cov_quad, rbergomi.covariance_levy_fbm_vix(T=T, u=u, v=v))
+
+    @pytest.mark.parametrize(
+        "T",
+        [1e-3, 0.3, 0.5, 1.0, 2.0, 5.0],
+    )
+    def test_params_proxy(self, T, rbergomi):
+        """
+        Check that the proxy parameters are consistent when xi0 is flat.
+        """
+        N_QUAD = 80
+        A_TOL = 1e-4
+        # mean_proxy
         assert np.allclose(
-            cov_quad,
-            rbergomi.covariance_levy_fbm_vix(T=T, u=u, v=v),
-            rtol=1e-6,
-            atol=1e-3,
+            rbergomi.mean_proxy(T, quad_scipy=True), rbergomi.mean_proxy_flat(T)
         )
+        # var_proxy
+        assert np.allclose(
+            rbergomi.var_proxy(T, quad_scipy=True), rbergomi.var_proxy_flat(T)
+        )
+        # gamma_1
+        gam1_proxy = rbergomi.gamma_1_proxy(T, n_quad=N_QUAD)
+        gam1_proxy_flat = rbergomi.gamma_1_proxy_flat(T)
+        assert np.allclose(gam1_proxy, gam1_proxy_flat, atol=A_TOL)
+        # gamma_2
+        gam2_proxy = rbergomi.gamma_2_proxy(T, n_quad=N_QUAD)
+        gam2_proxy_flat = rbergomi.gamma_2_proxy_flat(
+            T, n_quad=N_QUAD, quad_scipy=False
+        )
+        gam2_proxy_flat_sp = rbergomi.gamma_2_proxy_flat(T, quad_scipy=True)
+        assert np.allclose(gam2_proxy, gam2_proxy_flat, atol=A_TOL)
+        assert np.allclose(gam2_proxy, gam2_proxy_flat_sp, atol=A_TOL)
+        assert np.allclose(gam2_proxy_flat, gam2_proxy_flat_sp, atol=A_TOL)
+        # gamma_3
+        gam3_proxy = rbergomi.gamma_3_proxy(T, n_quad=N_QUAD)
+        gam3_proxy_flat = rbergomi.gamma_3_proxy_flat(
+            T, n_quad=N_QUAD, quad_scipy=False
+        )
+        gam3_proxy_flat_sp = rbergomi.gamma_3_proxy_flat(T, quad_scipy=True)
+        assert np.allclose(gam3_proxy, gam3_proxy_flat, atol=A_TOL)
+        assert np.allclose(gam3_proxy, gam3_proxy_flat_sp, atol=A_TOL)
+        assert np.allclose(gam3_proxy_flat, gam3_proxy_flat_sp, atol=A_TOL)

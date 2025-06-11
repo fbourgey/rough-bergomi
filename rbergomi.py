@@ -814,10 +814,16 @@ class RoughBergomi:
             2.0 * (1.0 - self.rho**2) * F
         ) + 0.5 * norm_h_fourier_squared
 
-    def fut_vix2(self, T, n_quad=20):
-        r"""Compute E[VIX_T^2] = 1/delta \int_{T}^{T+delta} \xi_0^u du"""
-        nodes, weights = utils.gauss_legendre(0, 1, n_quad)
-        return np.sum(weights * self.xi0(T + self.delta_vix * nodes))
+    def fut_vix2(self, T: float) -> float:
+        r"""
+        Compute the price of VIX^2 futures price. It corresponds to
+        E[VIX_T^2] = 1/delta \int_{T}^{T+delta} \xi_0^u du
+        """
+        if T < 0:
+            raise ValueError("Maturity T must be non-negative.")
+
+        integral, _ = integrate.quad(lambda u: self.xi0(u), T, T + self.delta_vix)
+        return integral / self.delta_vix
 
     def simulate_vix(self, T: float, n_mc: int, n_disc: int, rule="left", seed=None):
         """
@@ -833,20 +839,19 @@ class RoughBergomi:
 
         tab_u = np.linspace(T, T + self.delta_vix, n_disc + 1)
         n_disc = tab_u.shape[0] - 1
-        du = tab_u[1] - tab_u[0]
         y = self.cholesky_cov_matrix_vix(T, n_disc) @ np.random.randn(n_disc + 1, n_mc)
-        var_y = tab_u ** (2.0 * self.H) - (tab_u - tab_u[0]) ** (2.0 * self.H)
+        var_y = tab_u ** (2.0 * self.H) - (tab_u - T) ** (2.0 * self.H)
         xi = self.xi0(tab_u[:, None]) * np.exp(
             self.eta * y - 0.5 * self.eta**2 * var_y[:, None]
         )
 
         if rule == "left":
-            return np.sqrt(xi[:-1, :].mean(axis=0) * du)
+            return np.sqrt(xi[:-1, :].sum(axis=0) / n_disc)
         elif rule == "right":
-            return np.sqrt(xi[1:, :].mean(axis=0) * du)
+            return np.sqrt(xi[1:, :].sum(axis=0) / n_disc)
         elif rule == "trap":
             return np.sqrt(
-                0.5 * (xi[:-1, :].mean(axis=0) + xi[1:, :].mean(axis=0)) * du
+                0.5 * (xi[:-1, :].sum(axis=0) + xi[1:, :].sum(axis=0)) / n_disc
             )
 
     def implied_vol_vix(self, k, T, n_mc, n_disc, rule="trap", seed=None):
@@ -857,13 +862,168 @@ class RoughBergomi:
         vix = self.simulate_vix(T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed)
         return utils.black_otm_impvol_mc(S=vix, k=k, T=T)
 
-    def implied_vol_vix_approx(self):
-        pass
+    def price_vix(self, k, T, n_mc, n_disc, rule="trap", seed=None, opttype=1.0):
+        """
+        Compute a VIX option price at a given log-moneyness by Monte Carlo simulation.
+
+        Parameters
+        ----------
+        k : float or np.ndarray
+            Log-moneyness (typically 0 for ATM).
+        T : float
+            Maturity.
+        n_mc : int
+            Number of Monte Carlo paths.
+        n_disc : int
+            Number of time discretization steps.
+        rule : str, optional
+            Integration rule for the VIX simulation ('left', 'right', or 'trap').
+            Default is 'trap'.
+        seed : int or None, optional
+            Random seed for reproducibility. Default is None.
+
+        Returns
+        -------
+        float or np.ndarray
+            Estimated VIX price.
+        """
+        vix = self.simulate_vix(T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed)
+        vix = np.atleast_1d(np.asarray(vix))
+        k = np.atleast_1d(np.asarray(k))
+        opttype = np.atleast_1d(np.asarray(opttype))
+        F = np.mean(vix)
+        K = F * np.exp(k)
+        payoff = np.maximum(opttype[None, :] * (vix[:, None] - K[None, :]), 0.0)
+        price = np.mean(payoff, axis=0)
+        return price
+
+    def price_vix_fut(self, T, n_mc, n_disc, rule="trap", seed=None):
+        """
+        VIX futures price for maturity T by Monte Carlo simulation.
+        """
+        vix = self.simulate_vix(T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed)
+        vix = np.atleast_1d(np.asarray(vix))
+        price = np.mean(vix)
+        return price
+
+    def price_vix_approx(self, T, K, opttype=1, order=3) -> float:
+        """
+        VIX option price approximation.
+        """
+        if order not in [0, 1, 2, 3]:
+            raise ValueError("order must be one of 0, 1, 2, or 3.")
+
+        if opttype not in [-1, 1]:
+            raise ValueError("opttype must be either -1 (put) or 1 (call).")
+
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+
+        if K < 0:
+            raise ValueError("Strike K must be non-negative.")
+
+        is_fut = K == 0.0
+        meanp = self.mean_proxy_flat(T) + np.log(self.fut_vix2(T))
+        tot_varp = self.var_proxy_flat(T)
+        volp = np.sqrt(tot_varp / T)
+        S = np.exp(0.5 * meanp + 0.125 * tot_varp)
+
+        # order 0
+        price_0 = (
+            S
+            if is_fut
+            else utils.black_price(K=K, T=T, F=S, vol=0.5 * volp, opttype=opttype)
+        )
+        if order == 0:
+            return price_0
+        # order 1
+        if is_fut:
+            price_1 = 0.5 * S
+        else:
+            price_1 = (
+                0.5
+                * S
+                * utils.black_delta(K=K, T=T, F=S, vol=0.5 * volp, opttype=opttype)
+            )
+        gamma_1 = self.gamma_1_proxy(T=T)
+        if order == 1:
+            return price_0 + gamma_1 * price_1
+        # order 2
+        if is_fut:
+            price_2 = 0.25 * S
+        else:
+            price_2 = 0.5 * price_1
+            price_2 += 0.25 * S**2 * utils.black_gamma(K=K, T=T, F=S, vol=0.5 * volp)
+        gamma_2 = self.gamma_2_proxy(T=T)
+        if order == 2:
+            return price_0 + gamma_1 * price_1 + gamma_2 * price_2
+        # order 3
+        if is_fut:
+            price_3 = 0.125 * S
+        else:
+            price_3 = -0.5 * price_1 + 1.5 * price_2
+            price_3 += 0.125 * S**2 * utils.black_speed(K=K, T=T, F=S, vol=0.5 * volp)
+        gamma_3 = self.gamma_3_proxy(T=T)
+        if order == 3:
+            return price_0 + gamma_1 * price_1 + gamma_2 * price_2 + gamma_3 * price_3
+
+        raise ValueError("Invalid order specified for VIX futures price approximation.")
+
+    def price_vix_fut_approx(self, T, order=3) -> float:
+        """VIX futures price approximation."""
+        return self.price_vix_approx(T=T, K=0.0, order=order)
+        # if order not in [0, 1, 2, 3]:
+        #     raise ValueError("order must be one of 0, 1, 2, or 3.")
+
+        # if T <= 0:
+        #     raise ValueError("Maturity T must be positive.")
+
+        # meanp = self.mean_proxy_flat(T) + np.log(self.fut_vix2(T))
+        # tot_varp = self.var_proxy_flat(T)
+        # S = np.exp(meanp / 2.0 + tot_varp / 8.0)
+        # # order 0
+        # price_0 = S
+        # if order == 0:
+        #     return price_0
+        # # order 1
+        # gamma_1 = self.gamma_1_proxy_flat(T=T)
+        # price_1 = 0.5 * S
+        # if order == 1:
+        #     return price_0 + gamma_1 * price_1
+        # # order 2
+        # gamma_2 = self.gamma_2_proxy_flat(T=T)
+        # price_2 = 0.25 * S
+        # if order == 2:
+        #     return price_0 + gamma_1 * price_1 + gamma_2 * price_2
+        # # order 3
+        # gamma_3 = self.gamma_3_proxy_flat(T=T)
+        # price_3 = 0.125 * S
+        # if order == 3:
+        #     return price_0 + gamma_1 * price_1 + gamma_2 * price_2 + gamma_3 * price_3
+
+        # raise ValueError("Invalid order specified for VIX futures price approximation.")
+
+    def implied_vol_vix_approx(self, T, k, order=3):
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+
+        k = np.atleast_1d(np.asarray(k))
+        F = self.price_vix_fut_approx(T=T, order=order)
+        K = F * np.exp(k)
+        opttype = 2.0 * (K >= F) - 1.0
+        otm_price = np.array(
+            [
+                self.price_vix_approx(T=T, K=K_i, opttype=opttype_i, order=order)
+                for K_i, opttype_i in zip(K, opttype, strict=True)
+            ]
+        )
+        otm_impvol = utils.black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
+        return otm_impvol
 
     def kernel(self, u, t):
         return self.eta * np.sqrt(2.0 * self.H) * (u - t) ** (self.H - 0.5)
 
-    def mean_proxy(self, T, n_quad=20):
+    def mean_proxy(self, T, n_quad=40, quad_scipy=True):
         r"""
         Compute the mean of the VIX proxy.
 
@@ -875,18 +1035,31 @@ class RoughBergomi:
 
         where F_{VIX^2} is the price of the VIX^2 futures contract at time T.
         """
-        v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
-        mean = -0.5 * T / self.fut_vix2(T, n_quad=n_quad)
-        mean *= np.mean(
-            v_weights[:, None]
-            * v_weights[None, :]
-            * self.xi0(T + self.delta_vix * v_nodes[None, :])
-            * self.kernel(
-                u=T + self.delta_vix * v_nodes[None, :], t=T * v_nodes[:, None]
+        if quad_scipy:
+
+            def integrand(t):
+                integral = integrate.quad(
+                    lambda u: self.xi0(u) * self.kernel(u, t) ** 2,
+                    T,
+                    T + self.delta_vix,
+                )
+                return integral[0] / self.delta_vix
+
+            return -0.5 * integrate.quad(integrand, 0, T)[0] / self.fut_vix2(T)
+
+        else:
+            v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
+            mean = -0.5 * T / self.fut_vix2(T)
+            mean *= np.sum(
+                v_weights[:, None]
+                * v_weights[None, :]
+                * self.xi0(T + self.delta_vix * v_nodes[None, :])
+                * self.kernel(
+                    u=T + self.delta_vix * v_nodes[None, :], t=T * v_nodes[:, None]
+                )
+                ** 2
             )
-            ** 2
-        )
-        return mean
+            return mean
 
     def mean_proxy_flat(self, T):
         """
@@ -900,7 +1073,7 @@ class RoughBergomi:
         mean *= -(self.eta**2) / (2.0 * self.delta_vix * (2.0 * self.H + 1.0))
         return mean
 
-    def var_proxy(self, T, n_quad=20):
+    def var_proxy(self, T, n_quad=20, quad_scipy: bool = True):
         r"""
         Compute the variance of the VIX proxy.
 
@@ -912,50 +1085,100 @@ class RoughBergomi:
 
         where F_{VIX^2} is the price of the VIX^2 futures contract at time T.
         """
-        v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
-        inner = np.sum(
-            v_weights[None, :]
-            * self.xi0(T + self.delta_vix * v_nodes[None, :])
-            * self.kernel(
-                u=T + self.delta_vix * v_nodes[None, :], t=T * v_nodes[:, None]
-            )
-            ** 2,
-            axis=1,
-        ) / self.fut_vix2(T, n_quad)
-        return T * np.sum(v_weights * inner**2)
+        if quad_scipy:
+            fvix2 = self.fut_vix2(T)
+
+            def integrand(t):
+                integral = (
+                    integrate.quad(
+                        lambda u: self.xi0(u) * self.kernel(u, t),
+                        T,
+                        T + self.delta_vix,
+                    )[0]
+                    / fvix2
+                )
+                return (integral / self.delta_vix) ** 2
+
+            return integrate.quad(integrand, 0, T)[0]
+        else:
+            v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
+            inner = np.sum(
+                v_weights[None, :]
+                * self.xi0(T + self.delta_vix * v_nodes[None, :])
+                * self.kernel(
+                    u=T + self.delta_vix * v_nodes[None, :], t=T * v_nodes[:, None]
+                )
+                ** 2,
+                axis=1,
+            ) / self.fut_vix2(T)
+            return T * np.sum(v_weights * inner**2)
 
     def var_proxy_flat(self, T):
         """
         Compute the variance of the VIX proxy when xi0 is flat.
         """
-        # TODO: clean
-        var0 = (
+        var = (
             (T + self.delta_vix) ** (2.0 * self.H + 2.0)
             + T ** (2 * self.H + 2)
             - self.delta_vix ** (2 * self.H + 2)
         ) / (2 * self.H + 2)
-        var1 = (
+        var -= (
             2
-            * self.delta_vix ** (self.H + 1 / 2)
-            * T ** (self.H + 3 / 2)
-            * special.beta(1, self.H + 3 / 2)
+            * self.delta_vix ** (self.H + 0.5)
+            * T ** (self.H + 1.5)
             * special.hyp2f1(
-                -self.H - 1 / 2, self.H + 3 / 2, self.H + 5 / 2, -T / self.delta_vix
+                -self.H - 0.5, self.H + 1.5, self.H + 2.5, -T / self.delta_vix
             )
+            / (self.H + 1.5)
         )
-        var = (
-            (self.eta * np.sqrt(2.0 * self.H) / (self.delta_vix * (self.H + 1 / 2)))
-            ** 2
-        ) * (var0 - var1)
+        var *= (
+            self.eta * np.sqrt(2.0 * self.H) / (self.delta_vix * (self.H + 0.5))
+        ) ** 2
 
         return var
+
+    def integral_kernel(self, t, T):
+        r"""
+        Compute the integral of the kernel over the VIX proxy time interval
+
+        1/tau * \int_{T}^{T+tau} xi_0(u) * kernel(u, t) du
+
+        This is used in the gamma calculations.
+        """
+        # add gauss quad option
+        return (
+            integrate.quad(
+                lambda u: self.xi0(u) * self.kernel(u, t), T, T + self.delta_vix
+            )[0]
+            / self.delta_vix
+        ) / self.fut_vix2(T)
+
+    def integral_kernel_squared(self, t, T):
+        r"""
+        Compute the integral of the squared kernel over the VIX proxy time interval
+
+        1/tau * \int_{T}^{T+tau} xi_0(u) * kernel(u, t)**2 du
+
+        This is used in the gamma calculations.
+        """
+        # add gauss quad option
+        return (
+            integrate.quad(
+                lambda u: self.xi0(u) * self.kernel(u, t) ** 2, T, T + self.delta_vix
+            )[0]
+            / self.delta_vix
+        ) / self.fut_vix2(T)
 
     def gamma_1_proxy(self, T, n_quad=20):
         """
         Compute the first-order gamma coefficient of the VIX proxy.
         """
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+        if n_quad < 1:
+            raise ValueError("n_quad must be at least 1.")
         v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
-        fvix2 = self.fut_vix2(T=T, n_quad=n_quad)
+        fvix2 = self.fut_vix2(T=T)
         int_kernel_squared = (
             np.sum(
                 v_weights[None, :]
@@ -984,10 +1207,13 @@ class RoughBergomi:
             * T**2
             * np.sum(
                 v_weights[None, :]
-                * self.kernel(
-                    u=T + self.delta_vix * v_nodes[:, None], t=T * v_nodes[None, :]
-                )
-                - int_kernel_squared[None, :],
+                * (
+                    self.kernel(
+                        u=T + self.delta_vix * v_nodes[:, None], t=T * v_nodes[None, :]
+                    )
+                    ** 2
+                    - int_kernel_squared[None, :]
+                ),
                 axis=1,
             )
             ** 2
@@ -1018,48 +1244,54 @@ class RoughBergomi:
         """
         Compute the first-order gamma coefficient of the VIX proxy when xi0 is flat.
         """
-        eta = self.eta * np.sqrt(2.0 * self.H)
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
 
-        def gamma10(T):
-            tmp0 = (
-                (T + self.delta_vix) ** (4 * self.H + 1)
-                + self.delta_vix ** (4 * self.H + 1)
-                - T ** (4 * self.H + 1)
-            ) / ((4 * self.H + 1) * self.delta_vix)
-            tmp1 = (
-                T ** (2 * self.H + 1)
-                + self.delta_vix ** (2 * self.H + 1)
-                - (T + self.delta_vix) ** (2 * self.H + 1)
-            ) / (self.delta_vix * (2 * self.H + 1))
-            tmp1 = -(tmp1**2)
-            tmp2 = (
-                -2
-                * T ** (2 * self.H)
-                * self.delta_vix ** (2 * self.H)
-                * special.beta(1, 2 * self.H + 1)
-                * special.hyp2f1(
-                    -2 * self.H, 2 * self.H + 1, 2 * self.H + 2, -self.delta_vix / T
-                )
+        tmp0 = (
+            (T + self.delta_vix) ** (4.0 * self.H + 1.0)
+            + self.delta_vix ** (4.0 * self.H + 1.0)
+            - T ** (4.0 * self.H + 1.0)
+        )
+        tmp0 /= (4.0 * self.H + 1.0) * self.delta_vix
+        tmp1 = (
+            T ** (2 * self.H + 1)
+            + self.delta_vix ** (2 * self.H + 1)
+            - (T + self.delta_vix) ** (2 * self.H + 1)
+        )
+        tmp1 /= self.delta_vix * (2 * self.H + 1)
+        tmp1 = -(tmp1**2)
+        tmp2 = (
+            -2
+            * T ** (2 * self.H)
+            * self.delta_vix ** (2 * self.H)
+            * special.hyp2f1(
+                -2 * self.H, 2 * self.H + 1, 2 * self.H + 2, -self.delta_vix / T
             )
-            tmp3 = ((eta**4) / (32.0 * (self.H**2))) * (tmp0 + tmp1 + tmp2)
-            return tmp3
+            / (2.0 * self.H + 1.0)
+        )
+        gamma_10 = self.eta**4 * (tmp0 + tmp1 + tmp2) / 8.0
 
-        def gamma11(T):
-            tmp = ((eta**2) / (4 * self.H * (2 * self.H + 1) * self.delta_vix)) * (
-                (T + self.delta_vix) ** (2 * self.H + 1)
-                - T ** (2 * self.H + 1)
-                - self.delta_vix ** (2 * self.H + 1)
-            )
-            return tmp - 0.5 * self.var_proxy(T)
+        gamma_11 = (
+            (T + self.delta_vix) ** (2 * self.H + 1)
+            - T ** (2 * self.H + 1)
+            - self.delta_vix ** (2 * self.H + 1)
+        )
+        gamma_11 *= self.eta**2 / (2.0 * (2.0 * self.H + 1.0) * self.delta_vix)
+        gamma_11 -= 0.5 * self.var_proxy(T)
 
-        return gamma10(T) + gamma11(T)
+        return gamma_10 + gamma_11
 
     def gamma_2_proxy(self, T, n_quad=20):
         """
         Compute the second-order gamma coefficient of the VIX proxy.
         """
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+        if n_quad < 1:
+            raise ValueError("n_quad must be at least 1.")
+
         v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
-        fvix2 = self.fut_vix2(T=T, n_quad=n_quad)
+        fvix2 = self.fut_vix2(T=T)
         int_kernel_squared = (
             np.sum(
                 v_weights[None, :]
@@ -1096,7 +1328,6 @@ class RoughBergomi:
         )
         integrand *= np.sum(
             v_weights[None, :]
-            * int_kernel[None, :]
             * (
                 self.kernel(
                     u=T + self.delta_vix * v_nodes[:, None], t=T * v_nodes[None, :]
@@ -1115,41 +1346,68 @@ class RoughBergomi:
 
         return gamma_2
 
-    def gamma_2_proxy_flat(self, T):
+    def gamma_2_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 50):
         """
         Compute the second-order gamma coefficient of the VIX proxy when xi0 is flat.
         """
-        eta = self.eta * np.sqrt(2.0 * self.H)
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+        if n_quad < 1:
+            raise ValueError("n_quad must be at least 1.")
 
         def g2(t, a):
-            tmp0 = (
-                pow(T * t + self.delta_vix, self.H + 1 / 2) - pow(T * t, self.H + 1 / 2)
+            tmp = (
+                (T * t + self.delta_vix) ** (self.H + 0.5) - (T * t) ** (self.H + 0.5)
             ) * (
-                pow(T + a * self.delta_vix, 2 * self.H)
-                - pow(a * self.delta_vix, 2 * self.H)
+                (T + a * self.delta_vix) ** (2.0 * self.H)
+                - (a * self.delta_vix) ** (2.0 * self.H)
             )
-            tmp1 = pow(T * t + a * self.delta_vix, self.H - 1 / 2)
-            return tmp0 * tmp1
+            tmp *= (T * t + a * self.delta_vix) ** (self.H - 0.5)
+            return tmp
 
-        tmp0 = -(T * pow(eta, 4)) / (4 * self.delta_vix * (self.H + 1 / 2) * self.H)
-        gamma21 = tmp0 * integrate.dblquad(g2, 0, 1, lambda a: 0, lambda a: 1)[0]
-        gamma22 = (
-            pow(eta, 2)
-            * (
-                pow(T + self.delta_vix, 2 * self.H + 1)
-                - pow(T, 2 * self.H + 1)
-                - pow(self.delta_vix, 2 * self.H + 1)
+        if quad_scipy:
+
+            def inner_integral(a):
+                return integrate.quad(lambda t: g2(t, a), 0.0, 1.0)[0]
+
+            integral = integrate.quad(inner_integral, 0.0, 1.0)[0]
+
+        else:
+            v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
+
+            def inner_integral(a):
+                return np.sum(v_weights * g2(v_nodes, a))
+
+            integral = np.sum(
+                v_weights * np.array([inner_integral(a) for a in v_nodes])
             )
-            * self.var_proxy(T)
-        ) / (4 * self.H * (2 * self.H + 1) * self.delta_vix)
-        return gamma21 + gamma22
+
+        gamma_2 = (
+            -integral * T * self.eta**4 * self.H / (self.delta_vix * (self.H + 0.5))
+        )
+        gamma_2 += (
+            self.eta**2
+            * (
+                (T + self.delta_vix) ** (2.0 * self.H + 1)
+                - T ** (2.0 * self.H + 1.0)
+                - self.delta_vix ** (2.0 * self.H + 1.0)
+            )
+            * self.var_proxy_flat(T)
+        ) / (2.0 * (2.0 * self.H + 1.0) * self.delta_vix)
+
+        return gamma_2
 
     def gamma_3_proxy(self, T, n_quad=20):
         """
         Compute the third-order gamma coefficient of the VIX proxy.
         """
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+        if n_quad < 1:
+            raise ValueError("n_quad must be at least 1.")
+
         v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
-        fvix2 = self.fut_vix2(T=T, n_quad=n_quad)
+        fvix2 = self.fut_vix2(T=T)
         int_kernel = (
             np.sum(
                 v_weights[None, :]
@@ -1165,8 +1423,11 @@ class RoughBergomi:
             np.sum(
                 v_weights[None, :]
                 * int_kernel[None, :]
-                * self.kernel(
-                    u=T + self.delta_vix * v_nodes[:, None], t=T + v_nodes[None, :]
+                * (
+                    self.kernel(
+                        u=T + self.delta_vix * v_nodes[:, None], t=T * v_nodes[None, :]
+                    )
+                    - int_kernel[None, :]
                 ),
                 axis=1,
             )
@@ -1180,47 +1441,90 @@ class RoughBergomi:
         )
         return gamma_3
 
-    def gamma_3_proxy_flat(self, T):
+    def gamma_3_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 50):
         """
         Compute the third-order gamma coefficient of the VIX proxy when xi0 is flat.
         """
-        eta = self.eta * np.sqrt(2.0 * self.H)
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+        if n_quad < 1:
+            raise ValueError("n_quad must be at least 1.")
 
         def g3(t, a):
             d = self.delta_vix / T
             tmp0 = (
-                special.beta(1, self.H + 1.5)
-                * pow(a * d, self.H - 1 / 2)
+                (a * d) ** (self.H - 0.5)
                 * special.hyp2f1(
-                    -self.H + 1 / 2, self.H + 3 / 2, self.H + 5 / 2, -1 / (a * d)
+                    -self.H + 0.5, self.H + 1.5, self.H + 2.5, -1.0 / (a * d)
                 )
+                / (self.H + 1.5)
             )
-            tmp1 = pow(1 + a * d, self.H + 1 / 2) * special.hyp2f1(
-                -self.H - 1 / 2,
-                self.H + 1 / 2,
-                self.H + 3 / 2,
-                -(1 + a * d) / (d - a * d),
+            tmp1 = (1 + a * d) ** (self.H + 0.5) * special.hyp2f1(
+                -self.H - 0.5,
+                self.H + 0.5,
+                self.H + 1.5,
+                -(1.0 + a * d) / (d - a * d),
             )
-            tmp2 = pow(a * d, self.H + 1 / 2) * special.hyp2f1(
-                -self.H - 1 / 2, self.H + 1 / 2, self.H + 3 / 2, -(a * d) / (d - a * d)
+            tmp1 -= (a * d) ** (self.H + 0.5) * special.hyp2f1(
+                -self.H - 0.5, self.H + 0.5, self.H + 1.5, -(a * d) / (d - a * d)
             )
-            tmp3 = (
-                pow(1 - a, self.H + 1 / 2)
-                * pow(d, self.H + 1 / 2)
-                * special.beta(1, self.H + 1 / 2)
-                * (tmp1 - tmp2)
-            )
-            tmps = tmp3 - tmp0
+            tmp1 *= (1.0 - a) ** (self.H + 0.5) * d ** (self.H + 0.5) / (self.H + 0.5)
+            tmps = tmp1 - tmp0
             return (
-                pow(T, 4 * self.H)
-                * (pow(t + d, self.H + 1 / 2) - pow(t, self.H + 1 / 2))
-                * pow(t + a * d, self.H - 1 / 2)
+                T ** (4.0 * self.H)
+                * ((t + d) ** (self.H + 0.5) - t ** (self.H + 0.5))
+                * (t + a * d) ** (self.H - 0.5)
                 * tmps
             )
 
-        tmp0 = (pow(eta, 4) * pow(T, 2)) / (
-            2 * pow(self.delta_vix, 2) * pow(self.H + 1 / 2, 2)
-        )
-        gamma31 = tmp0 * integrate.dblquad(g3, 0, 1, lambda x: 0, lambda x: 1)[0]
+        if quad_scipy:
 
-        return gamma31 - 0.5 * pow(self.var_proxy(T), 2)
+            def inner_integral(a):
+                return integrate.quad(lambda t: g3(t, a), 0.0, 1.0)[0]
+
+            integral = integrate.quad(inner_integral, 0.0, 1.0)[0]
+
+        else:
+            v_nodes, v_weights = utils.gauss_legendre(0.0, 1.0, n_quad)
+
+            def inner_integral(a):
+                return np.sum(v_weights * g3(v_nodes, a))
+
+            integral = np.sum(
+                v_weights * np.array([inner_integral(a) for a in v_nodes])
+            )
+
+        gamma_3 = (
+            2.0
+            * self.eta**4
+            * self.H**2
+            * T**2
+            / (self.delta_vix**2 * (self.H + 0.5) ** 2)
+        )
+        gamma_3 *= integral
+        gamma_3 -= 0.5 * self.var_proxy_flat(T) ** 2
+
+        return gamma_3
+
+    def gammas_proxy(self, T, n_quad: int = 50):
+        # TODO: add parameter int_kernel, ... to avoid recomputing it
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+        if n_quad < 1:
+            raise ValueError("n_quad must be at least 1.")
+        return (
+            self.gamma_1_proxy(T=T, n_quad=n_quad),
+            self.gamma_2_proxy(T=T, n_quad=n_quad),
+            self.gamma_3_proxy(T=T, n_quad=n_quad),
+        )
+
+    def gammas_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 50):
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+        if n_quad < 1:
+            raise ValueError("n_quad must be at least 1.")
+        return (
+            self.gamma_1_proxy_flat(T),
+            self.gamma_2_proxy_flat(T, quad_scipy=quad_scipy, n_quad=n_quad),
+            self.gamma_3_proxy_flat(T, quad_scipy=quad_scipy, n_quad=n_quad),
+        )

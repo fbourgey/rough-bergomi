@@ -72,13 +72,90 @@ def black_price(K, T, F, vol, opttype=1):
     float
         The Black price of the option.
     """
-    w = T * vol**2
-    d1 = np.log(F / K) / w**0.5 + 0.5 * w**0.5
-    d2 = d1 - w**0.5
+    s = vol * T**0.5
+    d1 = np.log(F / K) / s + 0.5 * s
+    d2 = d1 - s
     price = opttype * (
         F * stats.norm.cdf(opttype * d1) - K * stats.norm.cdf(opttype * d2)
     )
     return price
+
+
+def black_delta(K, T, F, vol, opttype=1):
+    """
+    Calculate the Black delta of an option.
+
+    Parameters
+    ----------
+    K : float
+        Strike price of the option.
+    T : float
+        Time to maturity of the option.
+    F : float
+        Forward price of the underlying asset.
+    vol : float
+        Volatility of the underlying asset.
+    opttype : int, optional
+        Option type: 1 for call options, -1 for put options. Default is 1.
+
+    Returns
+    -------
+    float
+        The Black delta of the option.
+    """
+    s = vol * T**0.5
+    d1 = np.log(F / K) / s + 0.5 * s
+    return opttype * stats.norm.cdf(opttype * d1)
+
+
+def black_gamma(K, T, F, vol):
+    """
+    Calculate the Black gamma of an option.
+
+    Parameters
+    ----------
+    K : float
+        Strike price of the option.
+    T : float
+        Time to maturity of the option.
+    F : float
+        Forward price of the underlying asset.
+    vol : float
+        Volatility of the underlying asset.
+
+    Returns
+    -------
+    float
+        The Black gamma of the option.
+    """
+    s = vol * T**0.5
+    d1 = np.log(F / K) / s + 0.5 * s
+    return stats.norm.pdf(d1) / (F * s)
+
+
+def black_speed(K, T, F, vol):
+    """
+    Calculate the Black speed of an option.
+
+    Parameters
+    ----------
+    K : float
+        Strike price of the option.
+    T : float
+        Time to maturity of the option.
+    F : float
+        Forward price of the underlying asset.
+    vol : float
+        Volatility of the underlying asset.
+
+    Returns
+    -------
+    float
+        The Black speed of the option.
+    """
+    s = vol * T**0.5
+    d1 = np.log(F / K) / s + 0.5 * s
+    return -(d1 / s + 1.0) * stats.norm.pdf(d1) / (F**2 * s)
 
 
 def black_vega(K, T, F, vol):
@@ -101,9 +178,9 @@ def black_vega(K, T, F, vol):
     float
         The Black vega of the option.
     """
-    w = T * vol**2
-    d1 = np.log(F / K) / w**0.5 + 0.5 * w**0.5
-    return (F * stats.norm.pdf(d1) * np.sqrt(T)) / (K * vol)
+    s = vol * T**0.5
+    d1 = np.log(F / K) / s + 0.5 * s
+    return F * stats.norm.pdf(d1) * np.sqrt(T)
 
 
 @np.vectorize
@@ -144,7 +221,9 @@ def black_impvol_brentq(K, T, F, value, opttype=1):
         return np.nan
 
 
-def black_impvol(K, T, F, value, opttype=1, TOL=1e-6, MAX_ITER=1000):
+def black_impvol(
+    K, T, F, value, opttype: int | np.ndarray = 1, TOL=1e-5, MAX_ITER=1000
+):
     """
     Calculate the Black implied volatility using a bisection method.
 
@@ -196,8 +275,8 @@ def black_impvol(K, T, F, value, opttype=1, TOL=1e-6, MAX_ITER=1000):
     if T <= 0 or F <= 0:
         return np.full_like(K, np.nan)
 
-    low = 1e-10 * np.ones_like(K)
-    high = 5.0 * np.ones_like(K)
+    low = np.full_like(K, 1e-10)
+    high = np.full_like(K, 5.0)
     mid = 0.5 * (low + high)
     for _ in range(MAX_ITER):
         price = black_price(K, T, F, mid, opttype)
