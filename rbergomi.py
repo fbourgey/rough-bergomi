@@ -1,7 +1,7 @@
 import numpy as np
 from scipy import optimize, special, stats, integrate
 import utils
-from typing import Callable
+from collections.abc import Callable
 
 # add vix (rect/trap scheme) and weak approx
 # add tests
@@ -54,7 +54,9 @@ class RoughBergomi:
             raise ValueError("Correlation rho must be in [-1, 1].")
         if not callable(xi0):
             raise ValueError("xi0 must be a callable function.")
-        if not np.all(xi0(np.linspace(1e-10, 10, 1000)) > np.array([0.0])):
+        # Check positivity for a range of t >= 0
+        t_test = np.linspace(1e-10, 10, 1000)
+        if not np.all(xi0(t_test) > np.array([0.0])):
             raise ValueError("xi0 must be positive for all t >= 0.")
 
         self.s0 = s0
@@ -68,7 +70,8 @@ class RoughBergomi:
 
     def _is_xi0_flat(self) -> bool:
         """Check if the forward variance curve xi0 is flat."""
-        return np.allclose(self.xi0(np.linspace(1e-10, 10, 1000)), self.xi0_0)
+        t_test = np.linspace(1e-10, 10, 1000)
+        return np.allclose(self.xi0(t_test), self.xi0_0)
 
     def cov_levy_fbm(self, u, v):
         r"""
@@ -111,7 +114,7 @@ class RoughBergomi:
         of the covariance matrix of the Gaussian vector (Y_{t_i}, W_{t_i})
         for 1 <= i <= n, where t_i are the timesteps in tab_t.
 
-        Here, W is a standard Brownion motion and
+        Here, W is a standard Brownian motion and
         Y_t = \sqrt{2H} \int_0^t (t-s)^{H-1/2} dW_s.
 
         Parameters
@@ -160,6 +163,33 @@ class RoughBergomi:
         return chol
 
     def covariance_levy_fbm_vix(self, T, u, v):
+        r"""
+        Compute the covariance matrix for the VIX integrals of Levy's fractional
+        Brownian motion.
+
+        Specifically, computes the covariance:
+            Cov(Y_T^u, Y_T^v)
+        where
+            Y_T^u = sqrt(2H) * \int_0^T (u - s)^{H - 1/2} dW_s,
+        for u, v >= T, and W is a standard Brownian motion.
+
+        This is used for simulating the VIX under the rough Bergomi model.
+
+        Parameters
+        ----------
+        T : float
+            Lower limit of the integral (typically the VIX start time).
+        u : np.ndarray
+            First set of time points (must satisfy u >= T).
+        v : np.ndarray
+            Second set of time points (must satisfy v >= T).
+
+        Returns
+        -------
+        np.ndarray
+            Covariance matrix evaluated at (u, v), with the same shape as u and v.
+        """
+
         def func(x, y):
             tmp1 = x ** (self.H + 0.5) * special.hyp2f1(
                 0.5 - self.H, 0.5 + self.H, 1.5 + self.H, -x / (y - x)
@@ -179,62 +209,17 @@ class RoughBergomi:
         cov[u == v] = u[u == v] ** (2.0 * self.H) - (u[u == v] - T) ** (2.0 * self.H)
         cov[u < v] = func(u[u < v], v[u < v])
         cov[u > v] = func(v[u > v], u[u > v])
-        return cov
-
-        # cov = np.where(
-        #     u == v,
-        #     u ** (2.0 * self.H) - (u - T) ** (2.0 * self.H),
-        #     2.0
-        #     * self.H
-        #     * np.where(
-        #         v > u,
-        #         (v - u) ** (self.H - 0.5)
-        #         * (
-        #             u ** (self.H + 0.5)
-        #             * special.hyp2f1(
-        #                 0.5 - self.H,
-        #                 0.5 + self.H,
-        #                 1.5 + self.H,
-        #                 -u / (v - u),
-        #             )
-        #             - (u - T) ** (self.H + 0.5)
-        #             * special.hyp2f1(
-        #                 0.5 - self.H,
-        #                 0.5 + self.H,
-        #                 1.5 + self.H,
-        #                 -(u - T) / (v - u),
-        #             )
-        #         )
-        #         / (self.H + 0.5),
-        #         (u - v) ** (self.H - 0.5)
-        #         * (
-        #             v ** (self.H + 0.5)
-        #             * special.hyp2f1(
-        #                 0.5 - self.H,
-        #                 0.5 + self.H,
-        #                 1.5 + self.H,
-        #                 -v / (u - v),
-        #             )
-        #             - (v - T) ** (self.H + 0.5)
-        #             * special.hyp2f1(
-        #                 0.5 - self.H,
-        #                 0.5 + self.H,
-        #                 1.5 + self.H,
-        #                 -(v - T) / (u - v),
-        #             )
-        #         )
-        #         / (self.H + 0.5),
-        #     ),
-        # )
         return np.real(cov)
 
-    def cholesky_cov_matrix_vix(self, T: float, n_disc: int, return_cov: bool = False):
+    def cholesky_cov_matrix_vix(
+        self, T: float, n_disc: int, return_cov: bool = False
+    ) -> np.ndarray:
         r"""
         Compute the lower-triangular Cholesky factor of the covariance matrix of the
         Gaussian vector (Y_{T}^{u_i}) for 0 <= i <= n, where u_i = T + delta * i / n
         and delta = 30 / 365 (30 days in years).
 
-        Here, W is a standard Brownion motion and
+        Here, W is a standard Brownian motion and
         Y_T^u = \sqrt{2H} \int_0^T (u-s)^{H-1/2} dW_s, for any u >= T.
 
         Parameters
@@ -253,7 +238,6 @@ class RoughBergomi:
             Lower-triangular Cholesky factor of the covariance matrix, or the covariance
             matrix itself if `return_cov` is True.
         """
-        # TODO: simplify
         tab_u = np.linspace(T, T + self.delta_vix, n_disc + 1)
         u = np.tile(tab_u, (n_disc + 1, 1)).T
         v = u.T
@@ -486,7 +470,7 @@ class RoughBergomi:
     def implied_vol(
         self,
         k,
-        T,
+        T: float,
         n_mc: int,
         n_disc: int,
         n_loop: int = 1,
@@ -540,7 +524,7 @@ class RoughBergomi:
 
     def implied_vol_from_paths(
         self,
-        T,
+        T: float,
         int_v_dt,
         int_sqrt_v_dw,
         k=0.0,
@@ -616,7 +600,12 @@ class RoughBergomi:
         return impvol
 
     def atm_implied_vol_local_vol_skew(
-        self, tab_t, n_mc, n_loop=1, seed=None, n_disc_split=50
+        self,
+        tab_t: np.ndarray,
+        n_mc: int,
+        n_loop: int = 1,
+        seed: int | None = None,
+        n_disc_split: int = 50,
     ):
         """
         Compute the ATM implied volatility skew and local volatility skew
@@ -816,8 +805,32 @@ class RoughBergomi:
 
     def fut_vix2(self, T: float) -> float:
         r"""
-        Compute the price of VIX^2 futures price. It corresponds to
-        E[VIX_T^2] = 1/delta \int_{T}^{T+delta} \xi_0^u du
+        Compute the fair value of a VIX squared futures contract at maturity T. It
+        corresponds to:
+
+            E[VIX_T^2] = 1/delta \int_{T}^{T+delta} \xi_0^u du
+
+        where delta is the VIX window (30/365 years by default) and xi0(u) is the
+        forward variance curve.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX future (must be non-negative).
+
+        Returns
+        -------
+        float
+            Fair value of the VIX squared futures contract at time T.
+
+        Raises
+        ------
+        ValueError
+            If T is negative.
+
+        Notes
+        -----
+        This is a model-free quantity, depending only on the forward variance curve.
         """
         if T < 0:
             raise ValueError("Maturity T must be non-negative.")
@@ -825,11 +838,28 @@ class RoughBergomi:
         integral, _ = integrate.quad(lambda u: self.xi0(u), T, T + self.delta_vix)
         return integral / self.delta_vix
 
-    def simulate_vix(self, T: float, n_mc: int, n_disc: int, rule="left", seed=None):
+    def simulate_vix(self, T: float, n_mc: int, n_disc: int, rule="trap", seed=None):
         """
-        tab_u : np.ndarray
-            Array of time grid points [T,T+delta] for the VIX simulation
-            (shape: n_steps + 1,).
+        Simulate sample paths of the VIX.
+
+        Parameters
+        ----------
+        T : float
+            Maturity.
+        n_mc : int
+            Number of Monte Carlo paths.
+        n_disc : int
+            Number of time discretization steps.
+        rule : str, optional
+            Integration rule for the VIX simulation ('left', 'right', or 'trap').
+            Default is 'left'.
+        seed : int or None, optional
+            Random seed for reproducibility. Default is None.
+
+        Returns
+        -------
+        np.ndarray
+            Simulated VIX values (shape: n_mc,).
         """
         if seed is not None:
             np.random.seed(seed)
@@ -856,8 +886,31 @@ class RoughBergomi:
 
     def implied_vol_vix(self, k, T, n_mc, n_disc, rule="trap", seed=None) -> np.ndarray:
         """
-        Compute the implied volatility of the VIX at a given log-moneyness by Monte
-        Carlo simulation.
+        Compute the implied volatility of a VIX option at a given log-moneyness
+        using Monte Carlo simulation.
+
+        Parameters
+        ----------
+        k : float or np.ndarray
+            Log-moneyness of the VIX option (typically 0 for ATM). Can be a scalar
+            or array.
+        T : float
+            Maturity of the VIX option.
+        n_mc : int
+            Number of Monte Carlo simulation paths.
+        n_disc : int
+            Number of time discretization steps for the VIX simulation.
+        rule : str, optional
+            Integration rule for the VIX simulation ('left', 'right', or 'trap').
+            Default is 'trap'.
+        seed : int or None, optional
+            Random seed for reproducibility. Default is None.
+
+        Returns
+        -------
+        np.ndarray
+            Implied volatility values for the VIX option(s) at the specified
+            log-moneyness.
         """
         vix = self.simulate_vix(T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed)
         return utils.black_otm_impvol_mc(S=vix, k=k, T=T)
@@ -899,16 +952,60 @@ class RoughBergomi:
 
     def price_vix_fut(self, T, n_mc, n_disc, rule="trap", seed=None):
         """
-        VIX futures price for maturity T by Monte Carlo simulation.
+        Estimate the price of a VIX futures contract at maturity T using Monte Carlo
+        simulation.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX future.
+        n_mc : int
+            Number of Monte Carlo simulation paths.
+        n_disc : int
+            Number of time discretization steps for the VIX simulation.
+        rule : str, optional
+            Integration rule for the VIX simulation ('left', 'right', or 'trap').
+            Default is 'trap'.
+        seed : int or None, optional
+            Random seed for reproducibility. Default is None.
+
+        Returns
+        -------
+        float
+            Estimated VIX futures price at maturity T.
         """
         vix = self.simulate_vix(T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed)
         vix = np.atleast_1d(np.asarray(vix))
         price = np.mean(vix)
         return price
 
-    def price_vix_approx(self, k, T, opttype=1, order=3) -> float:
+    def price_vix_approx(self, k, T, opttype=1, order=3, return_fut=False) -> float:
         """
-        VIX option price approximation.
+        Approximate the price of a VIX option using a proxy expansion.
+
+        Parameters
+        ----------
+        k : float
+            Log-moneyness (typically 0 for ATM).
+        T : float
+            Maturity of the VIX option.
+        opttype : int, optional
+            Option type: 1 for call, -1 for put. Default is 1 (call).
+        order : int, optional
+            Order of the expansion (0, 1, 2, or 3). Default is 3.
+        return_fut : bool, optional
+            If True, return the proxy for the VIX future instead of the option price.
+            Default is False.
+
+        Returns
+        -------
+        float
+            Approximated VIX option price (or VIX future if return_fut is True).
+
+        Raises
+        ------
+        ValueError
+            If order or opttype is invalid, or if T <= 0.
         """
         if order not in [0, 1, 2, 3]:
             raise ValueError("order must be one of 0, 1, 2, or 3.")
@@ -919,13 +1016,30 @@ class RoughBergomi:
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
 
-        F = self.price_vix_fut_approx(T=T, order=order)
-        K = F * np.exp(k)
+        if order >= 1:
+            gamma_1 = self.gamma_1_proxy(T=T)
+        if order >= 2:
+            gamma_2 = self.gamma_2_proxy(T=T)
+        if order == 3:
+            gamma_3 = self.gamma_3_proxy(T=T)
+
         meanp = self.mean_proxy_flat(T) + np.log(self.fut_vix2(T))
         tot_varp = self.var_proxy_flat(T)
         volp = np.sqrt(tot_varp / T)
         S = np.exp(0.5 * meanp + 0.125 * tot_varp)
 
+        if order >= 0:
+            F = S
+        if order >= 1:
+            F += gamma_1 * 0.5 * S
+        if order >= 2:
+            F += gamma_2 * 0.25 * S
+        if order == 3:
+            F += gamma_3 * 0.125 * S
+        if return_fut:
+            return F
+
+        K = F * np.exp(k)
         # order 0
         price_0 = utils.black_price(K=K, T=T, F=S, vol=0.5 * volp, opttype=opttype)
         if order == 0:
@@ -934,26 +1048,43 @@ class RoughBergomi:
         price_1 = (
             0.5 * S * utils.black_delta(K=K, T=T, F=S, vol=0.5 * volp, opttype=opttype)
         )
-        gamma_1 = self.gamma_1_proxy(T=T)
         if order == 1:
             return price_0 + gamma_1 * price_1
         # order 2
         price_2 = 0.5 * price_1
         price_2 += 0.25 * S**2 * utils.black_gamma(K=K, T=T, F=S, vol=0.5 * volp)
-        gamma_2 = self.gamma_2_proxy(T=T)
         if order == 2:
             return price_0 + gamma_1 * price_1 + gamma_2 * price_2
         # order 3
         price_3 = -0.5 * price_1 + 1.5 * price_2
         price_3 += 0.125 * S**3 * utils.black_speed(K=K, T=T, F=S, vol=0.5 * volp)
-        gamma_3 = self.gamma_3_proxy(T=T)
         if order == 3:
             return price_0 + gamma_1 * price_1 + gamma_2 * price_2 + gamma_3 * price_3
 
         raise ValueError("Invalid order specified for VIX option price approximation.")
 
     def price_vix_fut_approx(self, T, order=3) -> float:
-        """VIX futures price approximation."""
+        """
+        Approximate the price of a VIX futures contract at maturity T using a proxy
+        expansion.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX future.
+        order : int, optional
+            Order of the expansion (0, 1, 2, or 3). Default is 3.
+
+        Returns
+        -------
+        float
+            Approximated VIX futures price.
+
+        Raises
+        ------
+        ValueError
+            If order is invalid or T <= 0.
+        """
         if order not in [0, 1, 2, 3]:
             raise ValueError("order must be one of 0, 1, 2, or 3.")
 
@@ -986,6 +1117,29 @@ class RoughBergomi:
         raise ValueError("Invalid order specified for VIX futures price approximation.")
 
     def implied_vol_vix_approx(self, T, k, order=3):
+        """
+        Approximate the implied volatility of a VIX option at a given log-moneyness
+        using the proxy expansion.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX option.
+        k : float or np.ndarray
+            Log-moneyness (typically 0 for ATM). Can be a scalar or array.
+        order : int, optional
+            Order of the expansion (0, 1, 2, or 3). Default is 3.
+
+        Returns
+        -------
+        np.ndarray
+            Approximated implied volatility for each log-moneyness value.
+
+        Raises
+        ------
+        ValueError
+            If T <= 0.
+        """
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
 
@@ -1003,19 +1157,50 @@ class RoughBergomi:
         return otm_impvol
 
     def kernel(self, u, t):
+        """
+        Compute the rough Bergomi kernel function.
+
+        Parameters
+        ----------
+        u : float or np.ndarray
+            Upper time(s) (must satisfy u > t).
+        t : float or np.ndarray
+            Lower time(s).
+
+        Returns
+        -------
+        float or np.ndarray
+            Value(s) of the kernel: eta * sqrt(2H) * (u - t)^{H - 0.5}.
+        """
         return self.eta * np.sqrt(2.0 * self.H) * (u - t) ** (self.H - 0.5)
 
     def mean_proxy(self, T, n_quad=40, quad_scipy=True):
         r"""
-        Compute the mean of the VIX proxy.
+        Compute the mean of the VIX proxy (log-variance process) at maturity T.
 
-        It is defined as:
-
+        The mean is defined as:
         -1/2 * \int_0^T {
             1/delta * \int_{T}^{T+delta} \xi_0(u) * kernel(u, t)^2 du / F_{VIX^2}
         } dt
 
-        where F_{VIX^2} is the price of the VIX^2 futures contract at time T.
+        where delta is the VIX window (30/365), xi0(u) is the forward variance curve,
+        kernel(u, t) is the rough Bergomi kernel, and F_{VIX^2} is the VIX^2 futures
+        price.
+
+        Parameters
+        ----------
+        T : float
+            Maturity.
+        n_quad : int, optional
+            Number of quadrature points for numerical integration (if not using scipy).
+            Default is 40.
+        quad_scipy : bool, optional
+            If True, use scipy's quad for integration. Default is True.
+
+        Returns
+        -------
+        float
+            Mean of the VIX proxy at maturity T.
         """
         if quad_scipy:
 
@@ -1045,7 +1230,17 @@ class RoughBergomi:
 
     def mean_proxy_flat(self, T):
         """
-        Compute the mean of the VIX proxy when xi0 is flat.
+        Compute the mean of the VIX proxy when the forward variance curve xi0 is flat.
+
+        Parameters
+        ----------
+        T : float
+            Maturity.
+
+        Returns
+        -------
+        float
+            Mean of the VIX proxy at maturity T for flat xi0.
         """
         mean = (
             (T + self.delta_vix) ** (2.0 * self.H + 1.0)
@@ -1057,15 +1252,31 @@ class RoughBergomi:
 
     def var_proxy(self, T, n_quad=20, quad_scipy: bool = True):
         r"""
-        Compute the variance of the VIX proxy.
+        Compute the variance of the VIX proxy at maturity T.
 
-        It is defined as:
-
+        The variance is defined as:
         \int_0^T {
             1/delta * \int_{T}^{T+delta} \xi_0(u) * kernel(u, t)^2 du / F_{VIX^2}
         }^2 dt
 
-        where F_{VIX^2} is the price of the VIX^2 futures contract at time T.
+        where delta is the VIX window (30/365), xi0(u) is the forward variance curve,
+        kernel(u, t) is the rough Bergomi kernel, and F_{VIX^2} is the VIX^2 futures
+        price.
+
+        Parameters
+        ----------
+        T : float
+            Maturity.
+        n_quad : int, optional
+            Number of quadrature points for numerical integration (if not using scipy).
+            Default is 20.
+        quad_scipy : bool, optional
+            If True, use scipy's quad for integration. Default is True.
+
+        Returns
+        -------
+        float
+            Variance of the VIX proxy at maturity T.
         """
         if quad_scipy:
             fvix2 = self.fut_vix2(T)
@@ -1097,7 +1308,18 @@ class RoughBergomi:
 
     def var_proxy_flat(self, T):
         """
-        Compute the variance of the VIX proxy when xi0 is flat.
+        Compute the variance of the VIX proxy when the forward variance curve xi0 is
+        flat.
+
+        Parameters
+        ----------
+        T : float
+            Maturity.
+
+        Returns
+        -------
+        float
+            Variance of the VIX proxy at maturity T for flat xi0.
         """
         var = (
             (T + self.delta_vix) ** (2.0 * self.H + 2.0)
@@ -1121,13 +1343,26 @@ class RoughBergomi:
 
     def integral_kernel(self, t, T):
         r"""
-        Compute the integral of the kernel over the VIX proxy time interval
+        Compute the normalized integral of the kernel over the VIX proxy time interval.
 
-        1/tau * \int_{T}^{T+tau} xi_0(u) * kernel(u, t) du
+        Specifically, computes:
+            (1/delta) * \int_{T}^{T+delta} xi0(u) * kernel(u, t) du / F_{VIX^2}
 
-        This is used in the gamma calculations.
+        This is used in the calculation of gamma coefficients for the VIX proxy
+        expansion.
+
+        Parameters
+        ----------
+        t : float
+            Lower time of the kernel.
+        T : float
+            Start of the VIX window.
+
+        Returns
+        -------
+        float
+            Value of the normalized kernel integral.
         """
-        # add gauss quad option
         return (
             integrate.quad(
                 lambda u: self.xi0(u) * self.kernel(u, t), T, T + self.delta_vix
@@ -1137,13 +1372,27 @@ class RoughBergomi:
 
     def integral_kernel_squared(self, t, T):
         r"""
-        Compute the integral of the squared kernel over the VIX proxy time interval
+        Compute the normalized integral of the squared kernel over the VIX proxy time
+        interval.
 
-        1/tau * \int_{T}^{T+tau} xi_0(u) * kernel(u, t)**2 du
+        Specifically, computes:
+            (1/delta) * \int_{T}^{T+delta} xi0(u) * kernel(u, t)^2 du / F_{VIX^2}
 
-        This is used in the gamma calculations.
+        This is used in the calculation of gamma coefficients for the VIX proxy
+        expansion.
+
+        Parameters
+        ----------
+        t : float
+            Lower time of the kernel.
+        T : float
+            Start of the VIX window.
+
+        Returns
+        -------
+        float
+            Value of the normalized squared kernel integral.
         """
-        # add gauss quad option
         return (
             integrate.quad(
                 lambda u: self.xi0(u) * self.kernel(u, t) ** 2, T, T + self.delta_vix
@@ -1153,7 +1402,25 @@ class RoughBergomi:
 
     def gamma_1_proxy(self, T, n_quad=20):
         """
-        Compute the first-order gamma coefficient of the VIX proxy.
+        Compute the first-order gamma coefficient of the VIX proxy using numerical
+        quadrature.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX future.
+        n_quad : int, optional
+            Number of quadrature points for numerical integration. Default is 20.
+
+        Returns
+        -------
+        float
+            First-order gamma coefficient.
+
+        Raises
+        ------
+        ValueError
+            If T <= 0 or n_quad < 1.
         """
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
@@ -1225,6 +1492,21 @@ class RoughBergomi:
     def gamma_1_proxy_flat(self, T):
         """
         Compute the first-order gamma coefficient of the VIX proxy when xi0 is flat.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX future.
+
+        Returns
+        -------
+        float
+            First-order gamma coefficient for flat xi0.
+
+        Raises
+        ------
+        ValueError
+            If T <= 0.
         """
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
@@ -1265,7 +1547,25 @@ class RoughBergomi:
 
     def gamma_2_proxy(self, T, n_quad=20):
         """
-        Compute the second-order gamma coefficient of the VIX proxy.
+        Compute the second-order gamma coefficient of the VIX proxy using numerical
+        quadrature.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX future.
+        n_quad : int, optional
+            Number of quadrature points for numerical integration. Default is 20.
+
+        Returns
+        -------
+        float
+            Second-order gamma coefficient.
+
+        Raises
+        ------
+        ValueError
+            If T <= 0 or n_quad < 1.
         """
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
@@ -1331,6 +1631,27 @@ class RoughBergomi:
     def gamma_2_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 50):
         """
         Compute the second-order gamma coefficient of the VIX proxy when xi0 is flat.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX future.
+        quad_scipy : bool, optional
+            If True, use scipy's quad for integration. If False, use Gauss-Legendre
+            quadrature. Default is False.
+        n_quad : int, optional
+            Number of quadrature points for numerical integration (if not using scipy).
+            Default is 50.
+
+        Returns
+        -------
+        float
+            Second-order gamma coefficient for flat xi0.
+
+        Raises
+        ------
+        ValueError
+            If T <= 0 or n_quad < 1.
         """
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
@@ -1381,7 +1702,25 @@ class RoughBergomi:
 
     def gamma_3_proxy(self, T, n_quad=20):
         """
-        Compute the third-order gamma coefficient of the VIX proxy.
+        Compute the third-order gamma coefficient of the VIX proxy using numerical
+        quadrature.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX future.
+        n_quad : int, optional
+            Number of quadrature points for numerical integration. Default is 20.
+
+        Returns
+        -------
+        float
+            Third-order gamma coefficient.
+
+        Raises
+        ------
+        ValueError
+            If T <= 0 or n_quad < 1.
         """
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
@@ -1426,6 +1765,27 @@ class RoughBergomi:
     def gamma_3_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 50):
         """
         Compute the third-order gamma coefficient of the VIX proxy when xi0 is flat.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX future.
+        quad_scipy : bool, optional
+            If True, use scipy's quad for integration. If False, use Gauss-Legendre
+            quadrature. Default is False.
+        n_quad : int, optional
+            Number of quadrature points for numerical integration (if not using scipy).
+            Default is 50.
+
+        Returns
+        -------
+        float
+            Third-order gamma coefficient for flat xi0.
+
+        Raises
+        ------
+        ValueError
+            If T <= 0 or n_quad < 1.
         """
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
