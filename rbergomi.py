@@ -308,7 +308,9 @@ class RoughBergomi:
         n_disc = tab_t.shape[0] - 1
         dt = tab_t[1] - tab_t[0]
 
-        v = np.zeros((n_disc + 1, n_mc))
+        tab_v = np.zeros((n_disc + 1, n_mc))
+        tab_w = np.zeros((n_disc + 1, n_mc))
+        tab_y = np.zeros((n_disc + 1, n_mc))
         int_v_dt = np.zeros(n_mc)
         int_sqrt_v_dw = np.zeros(n_mc)
 
@@ -341,22 +343,24 @@ class RoughBergomi:
             normal = None  # free memory
 
             # spot variance process
-            v_loop = self.xi0(tab_t[:, None]) * np.exp(
+            v = self.xi0(tab_t[:, None]) * np.exp(
                 self.eta * y - 0.5 * self.eta**2 * tab_t[:, None] ** (2.0 * self.H)
             )
             int_sqrt_v_dw[i * n_mc_loop : (i + 1) * n_mc_loop] = np.sum(
-                np.sqrt(v_loop[:-1, :]) * (w[1:, :] - w[:-1, :]), axis=0
+                np.sqrt(v[:-1, :]) * (w[1:, :] - w[:-1, :]), axis=0
             )
             # trapezoidal rule for the integral
             int_v_dt[i * n_mc_loop : (i + 1) * n_mc_loop] = (
-                0.5 * dt * np.sum(v_loop[:-1, :] + v_loop[1:, :], axis=0)
+                0.5 * dt * np.sum(v[:-1, :] + v[1:, :], axis=0)
             )
-            v[:, i * n_mc_loop : (i + 1) * n_mc_loop] = v_loop
+            tab_v[:, i * n_mc_loop : (i + 1) * n_mc_loop] = v
+            tab_y[:, i * n_mc_loop : (i + 1) * n_mc_loop] = y
+            tab_w[:, i * n_mc_loop : (i + 1) * n_mc_loop] = w
 
         return {
-            "v": v,
-            "y": y,
-            "w": w,
+            "v": tab_v,
+            "y": tab_y,
+            "w": tab_w,
             "int_v_dt": int_v_dt,
             "int_sqrt_v_dw": int_sqrt_v_dw,
         }
@@ -641,6 +645,9 @@ class RoughBergomi:
         dt = tab_t[1] - tab_t[0]
         n_disc = tab_t.shape[0] - 1
 
+        print(v.shape)
+        print(w.shape)
+
         int_sqrt_v_dw_cumsum = np.cumsum(
             np.sqrt(v[:-1, :]) * np.diff(w, axis=0), axis=0
         )
@@ -683,14 +690,14 @@ class RoughBergomi:
             )
         return tab_t_split, (atm_impvol, atm_impvol_skew), (atm_lv, atm_lv_skew)
 
-    def rate_function(self, tab_y, N):
+    def rate_function(self, y, N):
         """
         Compute the rate function minimizing path coefficients for the
         large deviations principle.
 
         Parameters
         ----------
-        tab_y : np.ndarray
+        y : np.ndarray
             Array of y values (log-moneyness or displacement).
         N : int
             Number of Fourier basis functions for the Ritz projection.
@@ -699,20 +706,19 @@ class RoughBergomi:
         -------
         tuple
             tab_a : np.ndarray
-                Array of optimal coefficients (shape: len(tab_y), N).
+                Array of optimal coefficients (shape: len(y), N).
             tab_rate : np.ndarray
-                Array of rate function values (shape: len(tab_y),).
+                Array of rate function values (shape: len(y),).
         """
 
-        tab_rate = np.zeros_like(tab_y)
-        tab_a = np.zeros((np.shape(tab_y)[0], N))
+        tab_rate = np.zeros_like(y)
+        tab_a = np.zeros((np.shape(y)[0], N))
         sigma_0 = self.xi0_0**0.5
-        for i, y in enumerate(tab_y):
-            print("iteration", i + 1, "of", len(tab_y))
+        for i, y_i in enumerate(y):
             a_guess = np.zeros(N)
             a_guess[0] = (
-                y * self.rho / sigma_0
-                + y** 2
+                y_i * self.rho / sigma_0
+                + y_i** 2
                 / 2
                 * self.eta
                 / sigma_0** 2
@@ -721,13 +727,53 @@ class RoughBergomi:
                 * ((self.rho**2 + 1) * 0.65 - 3.0 * self.rho**2 / (self.H + 1.5))
             )
             optim = optimize.minimize(
-                lambda a, y=y: self.objective_function(a=a, y=y),
+                lambda a, y_i=y_i: self.objective_function_rate_function(a=a, y=y_i),
                 x0=a_guess,
             )
             tab_a[i, :] = optim.x
             tab_rate[i] = optim.fun
 
         return tab_a, tab_rate
+
+    def sigma_path_rate_function(self, y, n_trunc):
+        r"""
+        Compute sigma(\hat{h}_1^y), where h^y is the Cameron-Martin path minimizing
+        the rate function for a given y.
+
+        The path h^y is represented in a truncated Fourier basis:
+            h_t = \sum_{k=0}^{N-1} a_k e_k(t)
+        where the coefficients a_k are obtained by minimizing the rate function.
+
+        Here,
+            \hat{h}_t^y = \int_0^t kernel_rb(t, s) h_s ds
+        and
+            sigma(x) = sqrt(xi0^0) * exp(0.5 * eta * x)
+
+        Parameters
+        ----------
+        y : np.ndarray
+            Array of y values (log-moneyness).
+        n_trunc : int
+            Number of Fourier basis functions used in the truncation.
+
+        Returns
+        -------
+        np.ndarray
+            Array of sigma(\hat{h}_1^y) values, one for each y.
+        """
+        if n_trunc <= 0:
+            raise ValueError("n_trunc must be a positive integer.")
+        y = np.atleast_1d(y)
+        a, _ = self.rate_function(y, n_trunc)
+        x = np.array(
+            [
+                np.sum(
+                    a[i, :] * self.kernel_fourier_integrals(n=n_trunc, t=1.0),
+                )
+                for i in range(y.shape[0])
+            ]
+        )
+        return self.xi0_0**0.5 * np.exp(0.5 * self.eta * x)
 
     def kernel_fourier_integrals(self, n, t):
         r"""
@@ -762,36 +808,7 @@ class RoughBergomi:
 
         return tab * t**alpha / alpha
 
-        # tab = np.zeros(n)
-        # tab[0] = np.sqrt(2 * self.H) * t ** (self.H + 0.5) / (self.H + 0.5)
-        # for i in range(1, n):
-        #     if i % 2 == 0:
-        #         # \int_0^t sqrt(2H) * (t-s)^{H-1/2} * sqrt(2) * cos(i*pi*s) ds
-        #         # tab[i] = integrate.quad(lambda s: kernel_rb(t, s, H) * np.sqrt(2) * np.cos(i * np.pi * s), 0.01, t)[0]
-        #         tab[i] = mpm.hyp1f2(
-        #             1,
-        #             0.75 + 0.5 * self.H,
-        #             1.25 + 0.5 * self.H,
-        #             -((0.5 * i * np.pi * t) ** 2),
-        #         )
-        #         tab[i] *= (4.0 * np.sqrt(self.H) * t ** (self.H + 0.5)) / (
-        #             1.0 + 2.0 * self.H
-        #         )
-        #     else:
-        #         # \int_0^t sqrt(2H) * (t-s)^{H-1/2} * sqrt(2) * sin(i*pi*s) ds
-        #         # tab[i] = integrate.quad(lambda s: kernel_rb(t, s, H) * np.sqrt(2) * np.sin(i * np.pi * s), 0.01, t)[0]
-        #         tab[i] = mpm.hyp1f2(
-        #             1,
-        #             1.25 + 0.5 * self.H,
-        #             1.75 + 0.5 * self.H,
-        #             -((0.5 * i * np.pi * t) ** 2),
-        #         )
-        #         tab[i] *= (
-        #             16.0 * np.sqrt(self.H) * 0.5 * i * np.pi * t ** (1.5 + self.H)
-        #         ) / (3 + 8 * self.H + 4 * self.H**2)
-        # return tab
-
-    def objective_function(self, a, y):
+    def objective_function_rate_function(self, a, y):
         """
         Compute the rate function objective for the large deviations principle in
         rough volatility models.
@@ -1206,7 +1223,7 @@ class RoughBergomi:
         """
         return self.eta * np.sqrt(2.0 * self.H) * (u - t) ** (self.H - 0.5)
 
-    def mean_proxy(self, T, n_quad=40, quad_scipy=True):
+    def mean_proxy(self, T, n_quad=30, quad_scipy=True):
         r"""
         Compute the mean of the VIX proxy (log-variance process) at maturity T.
 
@@ -1282,7 +1299,7 @@ class RoughBergomi:
         mean *= -(self.eta**2) / (2.0 * self.delta_vix * (2.0 * self.H + 1.0))
         return mean
 
-    def var_proxy(self, T, n_quad=20, quad_scipy: bool = True):
+    def var_proxy(self, T, n_quad=30, quad_scipy: bool = True):
         r"""
         Compute the variance of the VIX proxy at maturity T.
 
@@ -1432,7 +1449,7 @@ class RoughBergomi:
             / self.delta_vix
         ) / self.fut_vix2(T)
 
-    def gamma_1_proxy(self, T, n_quad=20):
+    def gamma_1_proxy(self, T, n_quad=30):
         """
         Compute the first-order gamma coefficient of the VIX proxy using numerical
         quadrature.
@@ -1577,7 +1594,7 @@ class RoughBergomi:
 
         return gamma_10 + gamma_11
 
-    def gamma_2_proxy(self, T, n_quad=20):
+    def gamma_2_proxy(self, T, n_quad=30):
         """
         Compute the second-order gamma coefficient of the VIX proxy using numerical
         quadrature.
@@ -1660,7 +1677,7 @@ class RoughBergomi:
 
         return gamma_2
 
-    def gamma_2_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 50):
+    def gamma_2_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 30):
         """
         Compute the second-order gamma coefficient of the VIX proxy when xi0 is flat.
 
@@ -1732,7 +1749,7 @@ class RoughBergomi:
 
         return gamma_2
 
-    def gamma_3_proxy(self, T, n_quad=20):
+    def gamma_3_proxy(self, T, n_quad=30):
         """
         Compute the third-order gamma coefficient of the VIX proxy using numerical
         quadrature.
@@ -1794,7 +1811,7 @@ class RoughBergomi:
         )
         return gamma_3
 
-    def gamma_3_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 50):
+    def gamma_3_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 30):
         """
         Compute the third-order gamma coefficient of the VIX proxy when xi0 is flat.
 
@@ -1880,7 +1897,7 @@ class RoughBergomi:
 
         return gamma_3
 
-    def gammas_proxy(self, T, n_quad: int = 50):
+    def gammas_proxy(self, T, n_quad: int = 30):
         # TODO: add parameter int_kernel, ... to avoid recomputing it
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
@@ -1892,7 +1909,7 @@ class RoughBergomi:
             self.gamma_3_proxy(T=T, n_quad=n_quad),
         )
 
-    def gammas_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 50):
+    def gammas_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 30):
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
         if n_quad < 1:
