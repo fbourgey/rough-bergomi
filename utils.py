@@ -1,5 +1,7 @@
 import numpy as np
 from scipy import optimize, stats
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 def gauss_legendre(a: float, b: float, n: int) -> tuple[np.ndarray, np.ndarray]:
@@ -378,3 +380,24 @@ def fourier(n, t):
         )
         tab[i] *= np.sqrt(2.0)
     return tab
+
+
+def set_plot_style() -> None:
+    """Set default matplotlib parameters."""
+    plt.rcParams["figure.figsize"] = [9.0, 7.0]
+    sns.set_style(
+        style="ticks",
+        rc={
+            "axes.grid": True,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+        },
+    )
+    sns.set_context(
+        context="poster",
+        rc={
+            "grid.linewidth": 1.0,
+            "legend.fontsize": "x-small",
+            "legend.title_fontsize": "xx-small",
+        },
+    )

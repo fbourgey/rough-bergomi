@@ -854,7 +854,7 @@ class RoughBergomi:
                 0.5 * (xi[:-1, :].sum(axis=0) + xi[1:, :].sum(axis=0)) / n_disc
             )
 
-    def implied_vol_vix(self, k, T, n_mc, n_disc, rule="trap", seed=None):
+    def implied_vol_vix(self, k, T, n_mc, n_disc, rule="trap", seed=None) -> np.ndarray:
         """
         Compute the implied volatility of the VIX at a given log-moneyness by Monte
         Carlo simulation.
@@ -888,7 +888,7 @@ class RoughBergomi:
             Estimated VIX price.
         """
         vix = self.simulate_vix(T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed)
-        vix = np.atleast_1d(np.asarray(vix))
+        vix = np.asarray(vix)
         k = np.atleast_1d(np.asarray(k))
         opttype = np.atleast_1d(np.asarray(opttype))
         F = np.mean(vix)
@@ -906,7 +906,7 @@ class RoughBergomi:
         price = np.mean(vix)
         return price
 
-    def price_vix_approx(self, T, K, opttype=1, order=3) -> float:
+    def price_vix_approx(self, k, T, opttype=1, order=3) -> float:
         """
         VIX option price approximation.
         """
@@ -919,89 +919,71 @@ class RoughBergomi:
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
 
-        if K < 0:
-            raise ValueError("Strike K must be non-negative.")
-
-        is_fut = K == 0.0
+        F = self.price_vix_fut_approx(T=T, order=order)
+        K = F * np.exp(k)
         meanp = self.mean_proxy_flat(T) + np.log(self.fut_vix2(T))
         tot_varp = self.var_proxy_flat(T)
         volp = np.sqrt(tot_varp / T)
         S = np.exp(0.5 * meanp + 0.125 * tot_varp)
 
         # order 0
-        price_0 = (
-            S
-            if is_fut
-            else utils.black_price(K=K, T=T, F=S, vol=0.5 * volp, opttype=opttype)
-        )
+        price_0 = utils.black_price(K=K, T=T, F=S, vol=0.5 * volp, opttype=opttype)
         if order == 0:
             return price_0
         # order 1
-        if is_fut:
-            price_1 = 0.5 * S
-        else:
-            price_1 = (
-                0.5
-                * S
-                * utils.black_delta(K=K, T=T, F=S, vol=0.5 * volp, opttype=opttype)
-            )
+        price_1 = (
+            0.5 * S * utils.black_delta(K=K, T=T, F=S, vol=0.5 * volp, opttype=opttype)
+        )
         gamma_1 = self.gamma_1_proxy(T=T)
         if order == 1:
             return price_0 + gamma_1 * price_1
         # order 2
-        if is_fut:
-            price_2 = 0.25 * S
-        else:
-            price_2 = 0.5 * price_1
-            price_2 += 0.25 * S**2 * utils.black_gamma(K=K, T=T, F=S, vol=0.5 * volp)
+        price_2 = 0.5 * price_1
+        price_2 += 0.25 * S**2 * utils.black_gamma(K=K, T=T, F=S, vol=0.5 * volp)
         gamma_2 = self.gamma_2_proxy(T=T)
         if order == 2:
             return price_0 + gamma_1 * price_1 + gamma_2 * price_2
         # order 3
-        if is_fut:
-            price_3 = 0.125 * S
-        else:
-            price_3 = -0.5 * price_1 + 1.5 * price_2
-            price_3 += 0.125 * S**2 * utils.black_speed(K=K, T=T, F=S, vol=0.5 * volp)
+        price_3 = -0.5 * price_1 + 1.5 * price_2
+        price_3 += 0.125 * S**3 * utils.black_speed(K=K, T=T, F=S, vol=0.5 * volp)
         gamma_3 = self.gamma_3_proxy(T=T)
         if order == 3:
             return price_0 + gamma_1 * price_1 + gamma_2 * price_2 + gamma_3 * price_3
 
-        raise ValueError("Invalid order specified for VIX futures price approximation.")
+        raise ValueError("Invalid order specified for VIX option price approximation.")
 
     def price_vix_fut_approx(self, T, order=3) -> float:
         """VIX futures price approximation."""
-        return self.price_vix_approx(T=T, K=0.0, order=order)
-        # if order not in [0, 1, 2, 3]:
-        #     raise ValueError("order must be one of 0, 1, 2, or 3.")
+        if order not in [0, 1, 2, 3]:
+            raise ValueError("order must be one of 0, 1, 2, or 3.")
 
-        # if T <= 0:
-        #     raise ValueError("Maturity T must be positive.")
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
 
-        # meanp = self.mean_proxy_flat(T) + np.log(self.fut_vix2(T))
-        # tot_varp = self.var_proxy_flat(T)
-        # S = np.exp(meanp / 2.0 + tot_varp / 8.0)
-        # # order 0
-        # price_0 = S
-        # if order == 0:
-        #     return price_0
-        # # order 1
-        # gamma_1 = self.gamma_1_proxy_flat(T=T)
-        # price_1 = 0.5 * S
-        # if order == 1:
-        #     return price_0 + gamma_1 * price_1
-        # # order 2
-        # gamma_2 = self.gamma_2_proxy_flat(T=T)
-        # price_2 = 0.25 * S
-        # if order == 2:
-        #     return price_0 + gamma_1 * price_1 + gamma_2 * price_2
-        # # order 3
-        # gamma_3 = self.gamma_3_proxy_flat(T=T)
-        # price_3 = 0.125 * S
-        # if order == 3:
-        #     return price_0 + gamma_1 * price_1 + gamma_2 * price_2 + gamma_3 * price_3
+        meanp = self.mean_proxy_flat(T) + np.log(self.fut_vix2(T))
+        tot_varp = self.var_proxy_flat(T)
+        S = np.exp(meanp / 2.0 + tot_varp / 8.0)
+        # order 0
+        price_0 = S
+        if order == 0:
+            return price_0
+        # order 1
+        gamma_1 = self.gamma_1_proxy_flat(T=T)
+        price_1 = 0.5 * S
+        if order == 1:
+            return price_0 + gamma_1 * price_1
+        # order 2
+        gamma_2 = self.gamma_2_proxy_flat(T=T)
+        price_2 = 0.25 * S
+        if order == 2:
+            return price_0 + gamma_1 * price_1 + gamma_2 * price_2
+        # order 3
+        gamma_3 = self.gamma_3_proxy_flat(T=T)
+        price_3 = 0.125 * S
+        if order == 3:
+            return price_0 + gamma_1 * price_1 + gamma_2 * price_2 + gamma_3 * price_3
 
-        # raise ValueError("Invalid order specified for VIX futures price approximation.")
+        raise ValueError("Invalid order specified for VIX futures price approximation.")
 
     def implied_vol_vix_approx(self, T, k, order=3):
         if T <= 0:
@@ -1010,11 +992,11 @@ class RoughBergomi:
         k = np.atleast_1d(np.asarray(k))
         F = self.price_vix_fut_approx(T=T, order=order)
         K = F * np.exp(k)
-        opttype = 2.0 * (K >= F) - 1.0
+        opttype = 2 * (K >= F) - 1
         otm_price = np.array(
             [
-                self.price_vix_approx(T=T, K=K_i, opttype=opttype_i, order=order)
-                for K_i, opttype_i in zip(K, opttype, strict=True)
+                self.price_vix_approx(T=T, k=k_i, opttype=opttype_i, order=order)
+                for k_i, opttype_i in zip(k, opttype, strict=True)
             ]
         )
         otm_impvol = utils.black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
