@@ -2,6 +2,7 @@ import numpy as np
 from scipy import optimize, special, stats, integrate
 import utils
 from collections.abc import Callable
+import mpmath as mpm
 
 # add vix (rect/trap scheme) and weak approx
 # add tests
@@ -750,14 +751,45 @@ class RoughBergomi:
             Array of shape (n,) with the value of each integral for k = 0,...,n-1.
         """
         alpha = self.H + 0.5
-        range_n = np.arange(n)
-        k = 2 * np.pi * range_n
-        return np.real(
-            np.exp(1j * k * t)
-            * special.hyp1f1(alpha, alpha + 1, 1j * k * t)
-            * t**alpha
-            / alpha
-        )
+        tab = np.zeros(n)
+        tab[0] = np.sqrt(2.0 * self.H)
+        for m in range(1, n):
+            w_m = 2.0 * np.pi * m
+            if m % 2 == 0.0:
+                tab[m] = np.real(special.hyp1f1(1.0, alpha + 1.0, 1j * w_m * t))
+            else:
+                tab[m] = np.imag(special.hyp1f1(1.0, alpha + 1, 1j * w_m * t))
+
+        return tab * t**alpha / alpha
+
+        # tab = np.zeros(n)
+        # tab[0] = np.sqrt(2 * self.H) * t ** (self.H + 0.5) / (self.H + 0.5)
+        # for i in range(1, n):
+        #     if i % 2 == 0:
+        #         # \int_0^t sqrt(2H) * (t-s)^{H-1/2} * sqrt(2) * cos(i*pi*s) ds
+        #         # tab[i] = integrate.quad(lambda s: kernel_rb(t, s, H) * np.sqrt(2) * np.cos(i * np.pi * s), 0.01, t)[0]
+        #         tab[i] = mpm.hyp1f2(
+        #             1,
+        #             0.75 + 0.5 * self.H,
+        #             1.25 + 0.5 * self.H,
+        #             -((0.5 * i * np.pi * t) ** 2),
+        #         )
+        #         tab[i] *= (4.0 * np.sqrt(self.H) * t ** (self.H + 0.5)) / (
+        #             1.0 + 2.0 * self.H
+        #         )
+        #     else:
+        #         # \int_0^t sqrt(2H) * (t-s)^{H-1/2} * sqrt(2) * sin(i*pi*s) ds
+        #         # tab[i] = integrate.quad(lambda s: kernel_rb(t, s, H) * np.sqrt(2) * np.sin(i * np.pi * s), 0.01, t)[0]
+        #         tab[i] = mpm.hyp1f2(
+        #             1,
+        #             1.25 + 0.5 * self.H,
+        #             1.75 + 0.5 * self.H,
+        #             -((0.5 * i * np.pi * t) ** 2),
+        #         )
+        #         tab[i] *= (
+        #             16.0 * np.sqrt(self.H) * 0.5 * i * np.pi * t ** (1.5 + self.H)
+        #         ) / (3 + 8 * self.H + 4 * self.H**2)
+        # return tab
 
     def objective_function(self, a, y):
         """
@@ -783,18 +815,18 @@ class RoughBergomi:
             Compute the Fourier series expansion
             h_fourier(a, t) = \sum_{k=0}^{n-1} a_k * e_k(t)
             """
-            return np.dot(a, utils.fourier(n=n, t=t))
+            return np.sum(a * utils.fourier(n=n, t=t))
 
         def h_hat(t):
             r"""
             Compute \int_0^t kernel_rb(t, s, H) * h_prime(a, s) ds
             """
-            return np.dot(a, self.kernel_fourier_integrals(n=n, t=t))
+
+            return np.sum(a * self.kernel_fourier_integrals(n=n, t=t))
 
         def sigma(x):
-            return self.xi0_0 * np.exp(0.5 * self.eta * x)
+            return self.xi0_0**0.5 * np.exp(0.5 * self.eta * x)
 
-        a = np.atleast_1d(a)
         norm_h_fourier_squared = np.sum(a**2)
         F = integrate.quad(lambda x: sigma(h_hat(x)) ** 2, 0, 1)[0]
         G = integrate.quad(lambda x: sigma(h_hat(x)) * h_fourier(x), 0, 1)[0]

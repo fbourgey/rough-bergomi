@@ -277,8 +277,8 @@ def black_impvol(
     if T <= 0 or F <= 0:
         return np.full_like(K, np.nan)
 
-    low = np.full_like(K, 1e-10)
-    high = np.full_like(K, 5.0)
+    low = 1e-10 * np.ones_like(K)
+    high = 5.0 * np.ones_like(K)
     mid = 0.5 * (low + high)
     for _ in range(MAX_ITER):
         price = black_price(K, T, F, mid, opttype)
