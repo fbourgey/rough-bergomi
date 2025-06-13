@@ -645,13 +645,10 @@ class RoughBergomi:
         dt = tab_t[1] - tab_t[0]
         n_disc = tab_t.shape[0] - 1
 
-        print(v.shape)
-        print(w.shape)
-
         int_sqrt_v_dw_cumsum = np.cumsum(
             np.sqrt(v[:-1, :]) * np.diff(w, axis=0), axis=0
         )
-        int_v_dt_cumsum = np.cumsum(v[:-1, :] * dt, axis=0)
+        int_v_dt_cumsum = 0.5 * dt * np.cumsum(v[:-1, :] + v[1:, :], axis=0)
         int_sqrt_v_dw_cumsum = np.insert(int_sqrt_v_dw_cumsum, 0, 0.0, axis=0)
         int_v_dt_cumsum = np.insert(int_v_dt_cumsum, 0, 0.0, axis=0)
 
