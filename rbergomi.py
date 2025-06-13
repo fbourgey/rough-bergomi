@@ -907,6 +907,7 @@ class RoughBergomi:
         control_variate: bool = False,
         lbd=None,
         eta_2=None,
+        return_xi: bool = False,
     ):
         """
         Simulate sample paths of the VIX.
@@ -925,7 +926,17 @@ class RoughBergomi:
         seed : int or None, optional
             Random seed for reproducibility. Default is None.
         control_variate : bool, optional
-            #TODO
+            If True, use control variate technique to reduce variance of the
+            simulation. Default is False.
+        lbd : float or None, optional
+            If provided, use a mixed model with two different eta values.
+            lbd is the weight for the first eta value.
+        eta_2 : float or None, optional
+            If provided, use a mixed model with two different eta values.
+            This is the second eta value. Must be provided if `lbd` is not None.
+        return_xi : bool, optional
+            If True, return the simulated xi values instead of VIX values.
+            Default is False.
         Returns
         -------
         np.ndarray
@@ -944,7 +955,6 @@ class RoughBergomi:
         var_y = tab_u ** (2.0 * self.H) - (tab_u - T) ** (2.0 * self.H)
 
         is_mixed = lbd is not None and eta_2 is not None
-
         if is_mixed:
             exp_1 = np.exp(self.eta * y - 0.5 * self.eta**2 * var_y[:, None])
             exp_2 = np.exp(eta_2 * y - 0.5 * eta_2**2 * var_y[:, None])
@@ -953,6 +963,9 @@ class RoughBergomi:
             xi = self.xi0(tab_u[:, None]) * np.exp(
                 self.eta * y - 0.5 * self.eta**2 * var_y[:, None]
             )
+
+        if return_xi:
+            return xi
 
         if control_variate:
             if is_mixed:
@@ -966,19 +979,25 @@ class RoughBergomi:
         if rule == "left":
             vix = np.sqrt(xi[:-1, :].sum(axis=0) / n_disc)
             cv = (
-                np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) if control_variate else None
+                np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) ** 0.5
+                if control_variate
+                else None
             )
         elif rule == "right":
             vix = np.sqrt(xi[1:, :].sum(axis=0) / n_disc)
-            cv = np.exp(log_cv[1:, :].sum(axis=0) / n_disc) if control_variate else None
+            cv = (
+                np.exp(log_cv[1:, :].sum(axis=0) / n_disc) ** 0.5
+                if control_variate
+                else None
+            )
 
         else:
             vix = np.sqrt(
                 0.5 * (xi[:-1, :].sum(axis=0) + xi[1:, :].sum(axis=0)) / n_disc
             )
             if control_variate:
-                cv_left = np.exp(log_cv[:-1, :].sum(axis=0) / n_disc)
-                cv_right = np.exp(log_cv[1:, :].sum(axis=0) / n_disc)
+                cv_left = np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) ** 0.5
+                cv_right = np.exp(log_cv[1:, :].sum(axis=0) / n_disc) ** 0.5
                 cv = (cv_left, cv_right)
 
         return vix if not control_variate else (vix, cv)
@@ -1176,20 +1195,45 @@ class RoughBergomi:
         )
         if rule == "left":
             mean = np.mean(mean_vec[:-1])
-            std = np.mean(cov_matrix[:-1, :-1].flatten()) ** 0.5
+            std = (np.sum(cov_matrix[:-1, :-1]) / n_disc**2) ** 0.5
         elif rule == "right":
             mean = np.mean(mean_vec[1:])
-            std = np.mean(cov_matrix[1:, 1:].flatten()) ** 0.5
+            std = (np.sum(cov_matrix[1:, 1:]) / n_disc**2) ** 0.5
         else:
             mean = np.mean(mean_vec)
             std = np.mean(cov_matrix.flatten()) ** 0.5
 
-        F_cv = np.exp(0.5 * mean + 0.5 * (0.5 * std) ** 2)
+        F_cv = np.exp(0.5 * mean + 0.125 * std**2)
 
         if K == 0.0:
             return F_cv
 
         return utils.black_price(K=K, T=T, F=F_cv, vol=0.5 * std, opttype=opttype)
+
+    def limit_strong_error_vix_right(self, n, T):
+        """
+        Compute the limit of the L2 strong error for the VIX option price using the
+        right Riemann sum approximation as n -> infinity.
+        """
+        if not self.xi0_flat:
+            raise ValueError("xi0_flat must be set to True for limit strong error.")
+
+        integral = integrate.quad(
+            lambda t: t ** (self.H - 0.5) * (self.delta_vix + t) ** (self.H - 0.5), 0, T
+        )[0]
+        lim_strong_error = (
+            np.exp(self.eta**2 * T ** (2.0 * self.H))
+            + np.exp(
+                self.eta**2
+                * (
+                    (T + self.delta_vix) ** (2.0 * self.H)
+                    - self.delta_vix ** (2.0 * self.H)
+                )
+            )
+            - 2.0 * np.exp(self.eta**2 * 2.0 * self.H * integral)
+        )
+        coef_lim = 0.5 * self.xi0_0 * lim_strong_error**0.5
+        return coef_lim / n
 
     ####################################################################################
     # Weak approximation methods for VIX pricing
