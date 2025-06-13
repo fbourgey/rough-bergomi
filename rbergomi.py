@@ -2,11 +2,6 @@ import numpy as np
 from scipy import optimize, special, stats, integrate
 import utils
 from collections.abc import Callable
-import mpmath as mpm
-
-# add vix (rect/trap scheme) and weak approx
-# add tests
-# add a param to check if xi0 is flat or not
 
 
 class RoughBergomi:
@@ -73,6 +68,24 @@ class RoughBergomi:
         """Check if the forward variance curve xi0 is flat."""
         t_test = np.linspace(1e-10, 10, 1000)
         return np.allclose(self.xi0(t_test), self.xi0_0)
+
+    def kernel(self, u, t):
+        """
+        Compute the rough Bergomi kernel function.
+
+        Parameters
+        ----------
+        u : float or np.ndarray
+            Upper time(s) (must satisfy u > t).
+        t : float or np.ndarray
+            Lower time(s).
+
+        Returns
+        -------
+        float or np.ndarray
+            Value(s) of the kernel: eta * sqrt(2H) * (u - t)^{H - 0.5}.
+        """
+        return self.eta * np.sqrt(2.0 * self.H) * (u - t) ** (self.H - 0.5)
 
     def cov_levy_fbm(self, u, v):
         r"""
@@ -884,7 +897,17 @@ class RoughBergomi:
         integral, _ = integrate.quad(lambda u: self.xi0(u), T, T + self.delta_vix)
         return integral / self.delta_vix
 
-    def simulate_vix(self, T: float, n_mc: int, n_disc: int, rule="trap", seed=None):
+    def simulate_vix(
+        self,
+        T: float,
+        n_mc: int,
+        n_disc: int,
+        rule="trap",
+        seed=None,
+        control_variate: bool = False,
+        lbd=None,
+        eta_2=None,
+    ):
         """
         Simulate sample paths of the VIX.
 
@@ -901,11 +924,13 @@ class RoughBergomi:
             Default is 'left'.
         seed : int or None, optional
             Random seed for reproducibility. Default is None.
-
+        control_variate : bool, optional
+            #TODO
         Returns
         -------
         np.ndarray
-            Simulated VIX values (shape: n_mc,).
+            Simulated VIX values (shape: n_mc,) or simulated xi values if
+            `return_xi` is True (shape: n_disc + 1, n_mc).
         """
         if seed is not None:
             np.random.seed(seed)
@@ -917,20 +942,50 @@ class RoughBergomi:
         n_disc = tab_u.shape[0] - 1
         y = self.cholesky_cov_matrix_vix(T, n_disc) @ np.random.randn(n_disc + 1, n_mc)
         var_y = tab_u ** (2.0 * self.H) - (tab_u - T) ** (2.0 * self.H)
-        xi = self.xi0(tab_u[:, None]) * np.exp(
-            self.eta * y - 0.5 * self.eta**2 * var_y[:, None]
-        )
 
-        if rule == "left":
-            return np.sqrt(xi[:-1, :].sum(axis=0) / n_disc)
-        elif rule == "right":
-            return np.sqrt(xi[1:, :].sum(axis=0) / n_disc)
-        elif rule == "trap":
-            return np.sqrt(
-                0.5 * (xi[:-1, :].sum(axis=0) + xi[1:, :].sum(axis=0)) / n_disc
+        is_mixed = lbd is not None and eta_2 is not None
+
+        if is_mixed:
+            exp_1 = np.exp(self.eta * y - 0.5 * self.eta**2 * var_y[:, None])
+            exp_2 = np.exp(eta_2 * y - 0.5 * eta_2**2 * var_y[:, None])
+            xi = self.xi0(tab_u[:, None]) * (lbd * exp_1 + (1.0 - lbd) * exp_2)
+        else:
+            xi = self.xi0(tab_u[:, None]) * np.exp(
+                self.eta * y - 0.5 * self.eta**2 * var_y[:, None]
             )
 
-    def implied_vol_vix(self, k, T, n_mc, n_disc, rule="trap", seed=None) -> np.ndarray:
+        if control_variate:
+            if is_mixed:
+                raise ValueError("Control variate not implemented for the mixed case.")
+            log_cv = (
+                np.log(self.xi0(tab_u[:, None]))
+                + self.eta * y
+                - 0.5 * self.eta**2 * var_y[:, None]
+            )
+
+        if rule == "left":
+            vix = np.sqrt(xi[:-1, :].sum(axis=0) / n_disc)
+            cv = (
+                np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) if control_variate else None
+            )
+        elif rule == "right":
+            vix = np.sqrt(xi[1:, :].sum(axis=0) / n_disc)
+            cv = np.exp(log_cv[1:, :].sum(axis=0) / n_disc) if control_variate else None
+
+        else:
+            vix = np.sqrt(
+                0.5 * (xi[:-1, :].sum(axis=0) + xi[1:, :].sum(axis=0)) / n_disc
+            )
+            if control_variate:
+                cv_left = np.exp(log_cv[:-1, :].sum(axis=0) / n_disc)
+                cv_right = np.exp(log_cv[1:, :].sum(axis=0) / n_disc)
+                cv = (cv_left, cv_right)
+
+        return vix if not control_variate else (vix, cv)
+
+    def implied_vol_vix(
+        self, k, T, n_mc, n_disc, rule="trap", seed=None, lbd=None, eta_2=None
+    ) -> np.ndarray:
         """
         Compute the implied volatility of a VIX option at a given log-moneyness
         using Monte Carlo simulation.
@@ -958,10 +1013,23 @@ class RoughBergomi:
             Implied volatility values for the VIX option(s) at the specified
             log-moneyness.
         """
-        vix = self.simulate_vix(T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed)
+        vix = self.simulate_vix(
+            T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed, lbd=lbd, eta_2=eta_2
+        )
         return utils.black_otm_impvol_mc(S=vix, k=k, T=T)
 
-    def price_vix(self, k, T, n_mc, n_disc, rule="trap", seed=None, opttype=1.0):
+    def price_vix(
+        self,
+        k,
+        T,
+        n_mc,
+        n_disc,
+        rule="trap",
+        seed=None,
+        opttype=1.0,
+        lbd=None,
+        eta_2=None,
+    ):
         """
         Compute a VIX option price at a given log-moneyness by Monte Carlo simulation.
 
@@ -986,7 +1054,9 @@ class RoughBergomi:
         float or np.ndarray
             Estimated VIX price.
         """
-        vix = self.simulate_vix(T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed)
+        vix = self.simulate_vix(
+            T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed, lbd=lbd, eta_2=eta_2
+        )
         vix = np.asarray(vix)
         k = np.atleast_1d(np.asarray(k))
         opttype = np.atleast_1d(np.asarray(opttype))
@@ -996,7 +1066,17 @@ class RoughBergomi:
         price = np.mean(payoff, axis=0)
         return price
 
-    def price_vix_fut(self, T, n_mc, n_disc, rule="trap", seed=None):
+    def price_vix_fut(
+        self,
+        T,
+        n_mc,
+        n_disc,
+        rule="trap",
+        seed=None,
+        control_variate: bool = False,
+        lbd=None,
+        eta_2=None,
+    ):
         """
         Estimate the price of a VIX futures contract at maturity T using Monte Carlo
         simulation.
@@ -1014,17 +1094,106 @@ class RoughBergomi:
             Default is 'trap'.
         seed : int or None, optional
             Random seed for reproducibility. Default is None.
+        control_variate : bool, optional
+            If True, use control variate technique to reduce variance.
+            Default is False.
 
         Returns
         -------
         float
             Estimated VIX futures price at maturity T.
         """
-        vix = self.simulate_vix(T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed)
-        vix = np.atleast_1d(np.asarray(vix))
-        price = np.mean(vix)
+        if control_variate:
+            vix, vix_cv = self.simulate_vix(
+                T=T,
+                n_mc=n_mc,
+                n_disc=n_disc,
+                rule=rule,
+                seed=seed,
+                control_variate=True,
+            )
+            price = np.mean(vix - vix_cv) + self.price_vix_control_variate(
+                T=T, K=0.0, n_disc=n_disc, rule=rule
+            )
+        else:
+            vix = self.simulate_vix(
+                T=T,
+                n_mc=n_mc,
+                n_disc=n_disc,
+                rule=rule,
+                seed=seed,
+                lbd=lbd,
+                eta_2=eta_2,
+            )
+            vix = np.atleast_1d(np.asarray(vix))
+            price = np.mean(vix)
         return price
 
+    def price_vix_control_variate(
+        self, T: float, K, n_disc: int, rule="left", opttype=1
+    ):
+        """
+        Price a VIX option using a control variate.
+
+        This method computes the price of a VIX option with maturity `T` and strike `K`
+        using a control variate technique to reduce variance in the Monte Carlo
+        estimator. The control variate is typically chosen as an analytically tractable
+        approximation or proxy for the VIX payoff.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX option.
+        K : float
+            Strike of the VIX option.
+        n_disc : int
+            Number of time discretization steps for the simulation.
+        rule : str, optional
+            Numerical integration rule for the VIX calculation ('left', 'trap', etc.).
+            Default is 'left'.
+        opttype : int, optional
+            Option type: 1 for call, -1 for put. Default is 1 (call).
+
+        Returns
+        -------
+        float
+            Estimated price of the VIX option using the control variate method.
+        """
+        if T < 0:
+            raise ValueError("Maturity T must be non-negative.")
+        if rule not in ["left", "right", "trap"]:
+            raise ValueError("rule must be one of 'left', 'right', or 'trap'.")
+        if opttype not in [-1, 1]:
+            raise ValueError("opttype must be either -1 (put) or 1 (call).")
+        n_disc = int(n_disc)
+        if n_disc <= 0:
+            raise ValueError("n_disc must be a positive integer.")
+
+        tab_u = np.linspace(T, T + self.delta_vix, n_disc + 1)
+        cov_matrix = self.cholesky_cov_matrix_vix(T, n_disc, return_cov=True)
+        mean_vec = np.log(self.xi0(tab_u)) - 0.5 * self.eta**2 * (
+            tab_u ** (2.0 * self.H) - (tab_u - T) ** (2.0 * self.H)
+        )
+        if rule == "left":
+            mean = np.mean(mean_vec[:-1])
+            std = np.mean(cov_matrix[:-1, :-1].flatten()) ** 0.5
+        elif rule == "right":
+            mean = np.mean(mean_vec[1:])
+            std = np.mean(cov_matrix[1:, 1:].flatten()) ** 0.5
+        else:
+            mean = np.mean(mean_vec)
+            std = np.mean(cov_matrix.flatten()) ** 0.5
+
+        F_cv = np.exp(0.5 * mean + 0.5 * (0.5 * std) ** 2)
+
+        if K == 0.0:
+            return F_cv
+
+        return utils.black_price(K=K, T=T, F=F_cv, vol=0.5 * std, opttype=opttype)
+
+    ####################################################################################
+    # Weak approximation methods for VIX pricing
+    ####################################################################################
     def price_vix_approx(self, k, T, opttype=1, order=3, return_fut=False) -> float:
         """
         Approximate the price of a VIX option using a proxy expansion.
@@ -1162,6 +1331,137 @@ class RoughBergomi:
 
         raise ValueError("Invalid order specified for VIX futures price approximation.")
 
+    def price_vix_approx_mixed(
+        self, T, K, lbd, eta_2, opt_payoff, order=3, n_quad: int = 50, eps=1e-3
+    ) -> float:
+        """
+        Price a VIX option in the mixed case using the weak approximation.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX option.
+        K : float
+            Strike of the VIX option.
+        lbd : float
+            Mixing parameter between the two regimes.
+        eta_2 : float
+            Volatility of volatility parameter for the second exponential.
+        opt_payoff : callable
+            Payoff function of the option, e.g., lambda x: np.maximum(x - K, 0)
+            for a call.
+        order : int, optional
+            Order of the approximation expansion (default is 3).
+        n_quad : int, optional
+            Number of quadrature points for numerical integration (default is 50).
+        eps : float, optional
+            Finite-difference parameter for numerical integration (default is 1e-3).
+
+        Returns
+        -------
+        float
+            Approximated price of the VIX option using the mixed method.
+        """
+        if order not in [0, 1, 2, 3]:
+            raise ValueError("order must be one of 0, 1, 2, or 3.")
+
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+
+        rbergomi_eta_2 = self.__class__(
+            s0=self.s0, xi0=self.xi0, H=self.H, eta=eta_2, rho=self.rho
+        )
+
+        fvix2 = self.fut_vix2(T)
+        eta_1 = self.eta
+        meanp_1 = self.mean_proxy_flat(T)
+        meanp_2 = rbergomi_eta_2.mean_proxy_flat(T)
+        sigp_1 = self.var_proxy_flat(T) ** 0.5
+        sigp_2 = rbergomi_eta_2.var_proxy_flat(T) ** 0.5
+
+        # Define the payoff function based on the option type
+        if opt_payoff == "fut":
+            payoff = lambda x: np.sqrt(x)
+        elif opt_payoff == "call":
+            payoff = lambda x: np.maximum(np.sqrt(x) - K, 0.0)
+        elif opt_payoff == "put":
+            payoff = lambda x: np.maximum(K - np.sqrt(x), 0.0)
+        else:
+            raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
+
+        gamma_1_1 = self.gamma_1_proxy(T=T)
+        gamma_2_1 = self.gamma_2_proxy(T=T)
+        gamma_3_1 = self.gamma_3_proxy(T=T)
+        gamma_1_2 = rbergomi_eta_2.gamma_1_proxy(T=T)
+        gamma_2_2 = rbergomi_eta_2.gamma_2_proxy(T=T)
+        gamma_3_2 = rbergomi_eta_2.gamma_3_proxy(T=T)
+
+        mu0 = meanp_1 / self.eta**2.0
+
+        nodes, weights = utils.gauss_hermite(n_quad)
+
+        exp_1 = np.exp(meanp_1 + sigp_1 * nodes)
+        exp_2 = np.exp(meanp_2 + sigp_2 * nodes)
+        price_0 = np.sum(weights * payoff(fvix2 * (lbd * exp_1 + (1.0 - lbd) * exp_2)))
+
+        # order 0
+        if order == 0:
+            return price_0
+
+        def payoff_mixed(x, y, lbd, eta_1, eta_2, mu0):
+            term_0 = lbd * np.exp(x + y)
+            term_1 = (1 - lbd) * np.exp(
+                eta_2 * (eta_1 - eta_2) * (-mu0) + (eta_2 / eta_1) * x
+            )
+            return payoff(fvix2 * (term_0 + term_1))
+
+        def psi(x, idx=1):
+            if idx == 1:
+
+                def f_idx(y):
+                    return payoff_mixed(meanp_1 + sigp_1 * x, y, lbd, eta_1, eta_2, mu0)
+            else:
+
+                def f_idx(y):
+                    return payoff_mixed(
+                        meanp_2 + sigp_2 * x, y, 1.0 - lbd, eta_2, eta_1, mu0
+                    )
+
+            return (f_idx(eps) - f_idx(-eps)) / (2.0 * eps)
+
+        price_1 = gamma_1_1 * np.sum(
+            weights * np.array([psi(x, idx=1) for x in nodes])
+        ) + gamma_1_2 * np.sum(weights * np.array([psi(x, idx=2) for x in nodes]))
+
+        if order == 1:
+            return price_0 + price_1
+
+        price_2 = (
+            gamma_2_1
+            * np.sum(weights * np.array([x * psi(x, idx=1) for x in nodes]))
+            / sigp_1
+            + gamma_2_2
+            * np.sum(weights * np.array([x * psi(x, idx=2) for x in nodes]))
+            / sigp_2
+        )
+
+        if order == 2:
+            return price_0 + price_1 + price_2
+
+        price_3 = (
+            gamma_3_1
+            * np.sum(weights * np.array([(x**2 - 1.0) * psi(x, idx=1) for x in nodes]))
+            / sigp_1**2
+            + gamma_3_2
+            * np.sum(weights * np.array([(x**2 - 1.0) * psi(x, idx=2) for x in nodes]))
+            / sigp_2**2
+        )
+
+        if order == 3:
+            return price_0 + price_1 + price_2 + price_3
+
+        raise ValueError("Invalid order specified for VIX option price approximation.")
+
     def implied_vol_vix_approx(self, T, k, order=3):
         """
         Approximate the implied volatility of a VIX option at a given log-moneyness
@@ -1199,26 +1499,63 @@ class RoughBergomi:
                 for k_i, opttype_i in zip(k, opttype, strict=True)
             ]
         )
-        otm_impvol = utils.black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
-        return otm_impvol
+        return utils.black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
 
-    def kernel(self, u, t):
+    def implied_vol_vix_approx_mixed(
+        self, T, k, order=3, lbd=0.5, eta_2=1.0, n_quad=50, eps=1e-3
+    ):
         """
-        Compute the rough Bergomi kernel function.
+        Compute the implied volatility of a VIX option using a mixed
+        approximation method.
 
         Parameters
         ----------
-        u : float or np.ndarray
-            Upper time(s) (must satisfy u > t).
-        t : float or np.ndarray
-            Lower time(s).
+        T : float
+            Maturity of the VIX option.
+        k : float
+            Log-moneyness of the VIX option.
+        order : int, optional
+            Order of the approximation expansion (default is 3).
+        lbd : float, optional
+            Mixing parameter between the two regimes (default is 0.5).
+        eta_2 : float, optional
+            Volatility of volatility parameter for the second exponential
+            (default is 1.0).
+        n_quad : int, optional
+            Number of quadrature points for numerical integration (default is 50).
+        eps : float, optional
+            Tolerance for numerical integration (default is 1e-3).
 
         Returns
         -------
-        float or np.ndarray
-            Value(s) of the kernel: eta * sqrt(2H) * (u - t)^{H - 0.5}.
+        float
+            Approximated Black-Scholes implied volatility for the VIX option.
         """
-        return self.eta * np.sqrt(2.0 * self.H) * (u - t) ** (self.H - 0.5)
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+
+        k = np.atleast_1d(np.asarray(k))
+        F = self.price_vix_approx_mixed(
+            T=T, K=0.0, lbd=lbd, eta_2=eta_2, order=order, opt_payoff="fut"
+        )
+        K = F * np.exp(k)
+        opttype = 2 * (K >= F) - 1
+        otm_price = np.array(
+            [
+                self.price_vix_approx_mixed(
+                    T=T,
+                    K=K_i,
+                    lbd=lbd,
+                    eta_2=eta_2,
+                    opt_payoff="call" if opttype_i == 1 else "put",
+                    order=order,
+                    n_quad=n_quad,
+                    eps=eps,
+                )
+                for K_i, opttype_i in zip(K, opttype, strict=True)
+            ]
+        )
+        return utils.black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
 
     def mean_proxy(self, T, n_quad=30, quad_scipy=True):
         r"""
@@ -1893,26 +2230,3 @@ class RoughBergomi:
         gamma_3 -= 0.5 * self.var_proxy_flat(T) ** 2
 
         return gamma_3
-
-    def gammas_proxy(self, T, n_quad: int = 30):
-        # TODO: add parameter int_kernel, ... to avoid recomputing it
-        if T <= 0:
-            raise ValueError("Maturity T must be positive.")
-        if n_quad < 1:
-            raise ValueError("n_quad must be at least 1.")
-        return (
-            self.gamma_1_proxy(T=T, n_quad=n_quad),
-            self.gamma_2_proxy(T=T, n_quad=n_quad),
-            self.gamma_3_proxy(T=T, n_quad=n_quad),
-        )
-
-    def gammas_proxy_flat(self, T, quad_scipy: bool = False, n_quad: int = 30):
-        if T <= 0:
-            raise ValueError("Maturity T must be positive.")
-        if n_quad < 1:
-            raise ValueError("n_quad must be at least 1.")
-        return (
-            self.gamma_1_proxy_flat(T),
-            self.gamma_2_proxy_flat(T, quad_scipy=quad_scipy, n_quad=n_quad),
-            self.gamma_3_proxy_flat(T, quad_scipy=quad_scipy, n_quad=n_quad),
-        )

@@ -30,6 +30,31 @@ def gauss_legendre(a: float, b: float, n: int) -> tuple[np.ndarray, np.ndarray]:
     return knots_a_b, weights_a_b
 
 
+def gauss_hermite(n: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute the Gauss-Hermite quadrature points and weights.
+
+    Integration is with respect to the Gaussian density. It corresponds to the
+    probabilist's Hermite polynomials.
+
+    Parameters
+    ----------
+    n: int
+        Number of quadrature points.
+
+    Returns
+    -------
+    knots: array-like
+        Gauss-Hermite knots.
+    weight: array-like
+        Gauss-Hermite weights.
+    """
+    knots, weights = np.polynomial.hermite.hermgauss(n)
+    knots *= np.sqrt(2)
+    weights /= np.sqrt(np.pi)
+    return knots, weights
+
+
 def cholesky_from_svd(a: np.ndarray) -> np.ndarray:
     """
     Compute the Cholesky decomposition of a matrix using SVD and QR.
