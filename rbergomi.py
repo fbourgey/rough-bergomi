@@ -62,7 +62,7 @@ class RoughBergomi:
         self.H = H
         self.eta = eta
         self.rho = rho
-        self.delta_vix = 30.0 / 365.0
+        self.delta_vix = 1.0 / 12.0
 
     def _is_xi0_flat(self) -> bool:
         """Check if the forward variance curve xi0 is flat."""
@@ -978,27 +978,24 @@ class RoughBergomi:
 
         if rule == "left":
             vix = np.sqrt(xi[:-1, :].sum(axis=0) / n_disc)
-            cv = (
-                np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) ** 0.5
-                if control_variate
-                else None
-            )
+            if control_variate:
+                cv = np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) ** 0.5
+
         elif rule == "right":
             vix = np.sqrt(xi[1:, :].sum(axis=0) / n_disc)
-            cv = (
-                np.exp(log_cv[1:, :].sum(axis=0) / n_disc) ** 0.5
-                if control_variate
-                else None
-            )
+            if control_variate:
+                cv = np.exp(log_cv[1:, :].sum(axis=0) / n_disc) ** 0.5
 
         else:
             vix = np.sqrt(
                 0.5 * (xi[:-1, :].sum(axis=0) + xi[1:, :].sum(axis=0)) / n_disc
             )
             if control_variate:
-                cv_left = np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) ** 0.5
-                cv_right = np.exp(log_cv[1:, :].sum(axis=0) / n_disc) ** 0.5
-                cv = (cv_left, cv_right)
+                cv = np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) ** 0.5
+            # if control_variate:
+            #     cv_left = np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) ** 0.5
+            #     cv_right = np.exp(log_cv[1:, :].sum(axis=0) / n_disc) ** 0.5
+            #     cv = (cv_left, cv_right)
 
         return vix if not control_variate else (vix, cv)
 
@@ -1048,6 +1045,8 @@ class RoughBergomi:
         opttype=1.0,
         lbd=None,
         eta_2=None,
+        return_fut: bool = False,
+        control_variate: bool = False,
     ):
         """
         Compute a VIX option price at a given log-moneyness by Monte Carlo simulation.
@@ -1074,15 +1073,41 @@ class RoughBergomi:
             Estimated VIX price.
         """
         vix = self.simulate_vix(
-            T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed, lbd=lbd, eta_2=eta_2
+            T=T,
+            n_mc=n_mc,
+            n_disc=n_disc,
+            rule=rule,
+            seed=seed,
+            lbd=lbd,
+            eta_2=eta_2,
+            control_variate=control_variate,
         )
-        vix = np.asarray(vix)
+        if control_variate:
+            vix_mc, vix_mc_cv = vix
+            F = np.mean(vix_mc - vix_mc_cv) + self.price_vix_control_variate(
+                T=T, n_disc=n_disc, rule=rule, return_fut=True
+            )
+        else:
+            vix_mc = np.asarray(vix)
+            F = np.mean(vix_mc)
+
+        if return_fut:
+            return F
+
         k = np.atleast_1d(np.asarray(k))
         opttype = np.atleast_1d(np.asarray(opttype))
-        F = np.mean(vix)
         K = F * np.exp(k)
-        payoff = np.maximum(opttype[None, :] * (vix[:, None] - K[None, :]), 0.0)
-        price = np.mean(payoff, axis=0)
+        payoff = np.maximum(opttype[None, :] * (vix_mc[:, None] - K[None, :]), 0.0)
+        if control_variate:
+            payoff_cv = np.maximum(
+                opttype[None, :] * (vix_mc_cv[:, None] - K[None, :]), 0.0
+            )
+            price = np.mean(
+                payoff - payoff_cv, axis=0
+            ) + self.price_vix_control_variate(T=T, k=k, n_disc=n_disc, rule=rule)
+        else:
+            price = np.mean(payoff, axis=0)
+
         return price
 
     def price_vix_fut(
@@ -1122,34 +1147,22 @@ class RoughBergomi:
         float
             Estimated VIX futures price at maturity T.
         """
-        if control_variate:
-            vix, vix_cv = self.simulate_vix(
-                T=T,
-                n_mc=n_mc,
-                n_disc=n_disc,
-                rule=rule,
-                seed=seed,
-                control_variate=True,
-            )
-            price = np.mean(vix - vix_cv) + self.price_vix_control_variate(
-                T=T, K=0.0, n_disc=n_disc, rule=rule
-            )
-        else:
-            vix = self.simulate_vix(
-                T=T,
-                n_mc=n_mc,
-                n_disc=n_disc,
-                rule=rule,
-                seed=seed,
-                lbd=lbd,
-                eta_2=eta_2,
-            )
-            vix = np.atleast_1d(np.asarray(vix))
-            price = np.mean(vix)
-        return price
+        return self.price_vix(
+            k=0.0,
+            T=T,
+            n_mc=n_mc,
+            n_disc=n_disc,
+            rule=rule,
+            seed=seed,
+            opttype=1.0,
+            lbd=lbd,
+            eta_2=eta_2,
+            return_fut=True,
+            control_variate=control_variate,
+        )
 
     def price_vix_control_variate(
-        self, T: float, K, n_disc: int, rule="left", opttype=1
+        self, T: float, n_disc: int, k=0.0, rule="left", opttype=1, return_fut=False
     ):
         """
         Price a VIX option using a control variate.
@@ -1163,8 +1176,8 @@ class RoughBergomi:
         ----------
         T : float
             Maturity of the VIX option.
-        K : float
-            Strike of the VIX option.
+        k : float
+            Log-moneyness (typically 0 for ATM).
         n_disc : int
             Number of time discretization steps for the simulation.
         rule : str, optional
@@ -1172,6 +1185,8 @@ class RoughBergomi:
             Default is 'left'.
         opttype : int, optional
             Option type: 1 for call, -1 for put. Default is 1 (call).
+        return_fut : bool, optional
+            If True, return the proxy for the VIX future instead of the option price.
 
         Returns
         -------
@@ -1190,6 +1205,7 @@ class RoughBergomi:
 
         tab_u = np.linspace(T, T + self.delta_vix, n_disc + 1)
         cov_matrix = self.cholesky_cov_matrix_vix(T, n_disc, return_cov=True)
+        cov_matrix *= self.eta**2
         mean_vec = np.log(self.xi0(tab_u)) - 0.5 * self.eta**2 * (
             tab_u ** (2.0 * self.H) - (tab_u - T) ** (2.0 * self.H)
         )
@@ -1203,12 +1219,18 @@ class RoughBergomi:
             mean = np.mean(mean_vec)
             std = np.mean(cov_matrix.flatten()) ** 0.5
 
-        F_cv = np.exp(0.5 * mean + 0.125 * std**2)
+        F_cv = np.exp(0.5 * mean + 0.5 * (0.5 * std) ** 2)
 
-        if K == 0.0:
+        if return_fut:
             return F_cv
 
-        return utils.black_price(K=K, T=T, F=F_cv, vol=0.5 * std, opttype=opttype)
+        k = np.atleast_1d(np.asarray(k))
+        opttype = np.atleast_1d(np.asarray(opttype))
+        K = F_cv * np.exp(k)
+
+        return utils.black_price(
+            K=K, T=T, F=F_cv, vol=0.5 * std / T**0.5, opttype=opttype
+        )
 
     def limit_strong_error_vix_right(self, n, T):
         """
