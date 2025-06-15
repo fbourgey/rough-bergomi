@@ -1037,14 +1037,14 @@ class RoughBergomi:
     def price_vix(
         self,
         k,
-        T,
-        n_mc,
-        n_disc,
-        rule="trap",
-        seed=None,
+        T: float,
+        n_mc: int,
+        n_disc: int,
+        rule: str = "trap",
+        seed: int | None = None,
         opttype=1.0,
-        lbd=None,
-        eta_2=None,
+        lbd: float | None = None,
+        eta_2: float | None = None,
         return_fut: bool = False,
         control_variate: bool = False,
     ):
@@ -1446,12 +1446,21 @@ class RoughBergomi:
         sigp_2 = rbergomi_eta_2.var_proxy_flat(T) ** 0.5
 
         # Define the payoff function based on the option type
+        def payoff_fut(x):
+            return np.sqrt(x)
+
+        def payoff_call(x, K=K):
+            return np.maximum(np.sqrt(x) - K, 0.0)
+
+        def payoff_put(x, K=K):
+            return np.maximum(K - np.sqrt(x), 0.0)
+
         if opt_payoff == "fut":
-            payoff = lambda x: np.sqrt(x)
+            payoff = payoff_fut
         elif opt_payoff == "call":
-            payoff = lambda x: np.maximum(np.sqrt(x) - K, 0.0)
+            payoff = payoff_call
         elif opt_payoff == "put":
-            payoff = lambda x: np.maximum(K - np.sqrt(x), 0.0)
+            payoff = payoff_put
         else:
             raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
 

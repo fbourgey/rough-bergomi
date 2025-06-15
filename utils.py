@@ -3,6 +3,10 @@ from scipy import optimize, stats
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+# Module-level constants for magic numbers
+IMPVOL_MIN = 1e-10
+IMPVOL_MAX = 5.0
+
 
 def gauss_legendre(a: float, b: float, n: int) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -240,7 +244,7 @@ def black_impvol_brentq(K, T, F, value, opttype=1):
     try:
         result = optimize.root_scalar(
             f=lambda vol: black_price(K, T, F, vol, opttype) - value,
-            bracket=[1e-10, 5.0],
+            bracket=[IMPVOL_MIN, IMPVOL_MAX],
             method="brentq",
         )
         return result.root if result.converged else np.nan
@@ -293,7 +297,8 @@ def black_impvol(
     if K.shape != value.shape:
         raise ValueError("K and value must have the same shape.")
 
-    if np.abs(opttype).any() != 1:
+    # Fix: check all opttype values
+    if not np.all(np.abs(opttype) == 1):
         raise ValueError("opttype must be either 1 or -1.")
 
     F = float(F)
@@ -302,8 +307,8 @@ def black_impvol(
     if T <= 0 or F <= 0:
         return np.full_like(K, np.nan)
 
-    low = 1e-10 * np.ones_like(K)
-    high = 5.0 * np.ones_like(K)
+    low = IMPVOL_MIN * np.ones_like(K)
+    high = IMPVOL_MAX * np.ones_like(K)
     mid = 0.5 * (low + high)
     for _ in range(MAX_ITER):
         price = black_price(K, T, F, mid, opttype)
@@ -320,7 +325,9 @@ def black_impvol(
     raise ValueError("Implied volatility did not converge.")
 
 
-def black_otm_impvol_mc(S, k, T, mc_error=False):
+def black_otm_impvol_mc(
+    S: np.ndarray, k: float | np.ndarray, T: float, mc_error: bool = False
+) -> dict | np.ndarray:
     """
     Calculate Black implied volatility using Monte Carlo simulated stock prices and
     out-of-the-money (OTM) prices.
@@ -349,10 +356,11 @@ def black_otm_impvol_mc(S, k, T, mc_error=False):
                       prices.
         - 'otm_price': ndarray of the calculated OTM option prices.
     """
-    k = np.atleast_1d(np.asarray(k))
+    k = np.atleast_1d(k)
     F = np.mean(S)
     K = F * np.exp(k)
-    opttype = 2 * (K >= F) - 1
+    # opttype: 1 for call, -1 for put, depending on moneyness
+    opttype = 2 * (K >= F) - 1  # 1 if K >= F (call), -1 if K < F (put)
     payoff = np.maximum(opttype[None, :] * (S[:, None] - K[None, :]), 0.0)
     otm_price = np.mean(payoff, axis=0)
     otm_impvol = black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
@@ -376,9 +384,9 @@ def black_otm_impvol_mc(S, k, T, mc_error=False):
     return otm_impvol
 
 
-def fourier(n, t):
+def fourier(n: int, t: float) -> np.ndarray:
     """
-    Compute the first n Fourier basis functions evaluated at point s.
+    Compute the first n Fourier basis functions evaluated at point t.
 
     The basis consists of:
         - 1 (constant term)
@@ -395,7 +403,7 @@ def fourier(n, t):
     -------
     np.ndarray
         Array of shape (n,) containing the values of the first n Fourier basis
-        functions at s.
+        functions at t.
     """
     tab = np.zeros(n)
     tab[0] = 1.0
