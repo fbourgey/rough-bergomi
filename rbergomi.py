@@ -1459,10 +1459,9 @@ class RoughBergomi:
                         xi_level = xi_level[1:, :]
                     else:
                         xi_level = 0.5 * (xi_level[:-1, :] + xi_level[1:, :])
-
                     # extract VIX values at current and previous levels
-                    vix_level_high = np.sqrt(xi_level)
-                    vix_level_low = np.sqrt(xi_level[::2, :])
+                    vix_level_high = np.sqrt(xi_level.mean(axis=0))
+                    vix_level_low = np.sqrt(xi_level[::2, :].mean(axis=0))
                     price_mlmc += (
                         payoff(vix_level_high).mean() - payoff(vix_level_low).mean()
                     )
