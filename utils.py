@@ -81,7 +81,7 @@ def cholesky_from_svd(a: np.ndarray) -> np.ndarray:
     return r.T
 
 
-def black_price(K, T, F, vol, opttype=1):
+def black_price(K, T, F, vol, opttype: float | np.ndarray = 1.0):
     """
     Calculate the Black option price.
 
@@ -95,7 +95,7 @@ def black_price(K, T, F, vol, opttype=1):
         Forward price of the underlying asset.
     vol : float
         Volatility of the underlying asset.
-    opttype : int, optional
+    opttype : float or np.ndarray, optional
         Option type: 1 for call options, -1 for put options. Default is 1.
 
     Returns
@@ -434,3 +434,38 @@ def set_plot_style() -> None:
             "legend.title_fontsize": "xx-small",
         },
     )
+
+
+def linear_regression(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    """
+    Perform simple linear regression (least squares) to fit y = alpha + beta * x.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        One-dimensional array of independent variable values.
+    y : np.ndarray
+        One-dimensional array of dependent variable values.
+
+    Returns
+    -------
+    tuple[float, float]
+        A tuple (alpha, beta) where:
+        - alpha is the intercept of the regression line.
+        - beta is the slope of the regression line.
+
+    Raises
+    ------
+    ValueError
+        If x or y are not one-dimensional arrays.
+    """
+    x = np.atleast_1d(np.asarray(x))
+    y = np.atleast_1d(np.asarray(y))
+    if x.ndim != 1 or y.ndim != 1:
+        raise ValueError("x and y must be one-dimensional arrays.")
+    cov = np.cov(x, y)
+    cov_x_y = cov[0, 1]
+    var_x = cov[0, 0]
+    beta = cov_x_y / var_x
+    alpha = y.mean() - beta * x.mean()
+    return alpha, beta

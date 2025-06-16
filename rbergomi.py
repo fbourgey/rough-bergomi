@@ -1,5 +1,6 @@
 import numpy as np
 from scipy import optimize, special, stats, integrate
+from tqdm import tqdm
 import utils
 from collections.abc import Callable
 
@@ -977,21 +978,19 @@ class RoughBergomi:
             )
 
         if rule == "left":
-            vix = np.sqrt(xi[:-1, :].sum(axis=0) / n_disc)
+            vix = np.sqrt(xi[:-1, :].mean(axis=0))
             if control_variate:
-                cv = np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) ** 0.5
+                cv = np.exp(log_cv[:-1, :].mean(axis=0)) ** 0.5
 
         elif rule == "right":
-            vix = np.sqrt(xi[1:, :].sum(axis=0) / n_disc)
+            vix = np.sqrt(xi[1:, :].mean(axis=0))
             if control_variate:
-                cv = np.exp(log_cv[1:, :].sum(axis=0) / n_disc) ** 0.5
+                cv = np.exp(log_cv[1:, :].mean(axis=0)) ** 0.5
 
         else:
-            vix = np.sqrt(
-                0.5 * (xi[:-1, :].sum(axis=0) + xi[1:, :].sum(axis=0)) / n_disc
-            )
+            vix = np.sqrt(0.5 * (xi[:-1, :].mean(axis=0) + xi[1:, :].mean(axis=0)))
             if control_variate:
-                cv = np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) ** 0.5
+                cv = np.exp(log_cv[:-1, :].mean(axis=0)) ** 0.5
             # if control_variate:
             #     cv_left = np.exp(log_cv[:-1, :].sum(axis=0) / n_disc) ** 0.5
             #     cv_right = np.exp(log_cv[1:, :].sum(axis=0) / n_disc) ** 0.5
@@ -1036,16 +1035,16 @@ class RoughBergomi:
 
     def price_vix(
         self,
-        k,
         T: float,
         n_mc: int,
         n_disc: int,
+        k: float | np.ndarray = 0.0,
         rule: str = "trap",
         seed: int | None = None,
-        opttype=1.0,
+        opttype: float | np.ndarray = 1.0,
         lbd: float | None = None,
         eta_2: float | None = None,
-        return_fut: bool = False,
+        return_opt: str = "price",
         control_variate: bool = False,
     ):
         """
@@ -1053,25 +1052,45 @@ class RoughBergomi:
 
         Parameters
         ----------
-        k : float or np.ndarray
-            Log-moneyness (typically 0 for ATM).
         T : float
             Maturity.
         n_mc : int
             Number of Monte Carlo paths.
         n_disc : int
             Number of time discretization steps.
+        k : float or np.ndarray, optional
+            Log-moneyness of the VIX option (typically 0 for ATM). Can be a scalar
+            or array. Default is 0.0 (ATM).
         rule : str, optional
             Integration rule for the VIX simulation ('left', 'right', or 'trap').
             Default is 'trap'.
         seed : int or None, optional
             Random seed for reproducibility. Default is None.
+        opttype : float or np.ndarray, optional
+            Option type: 1 for call, -1 for put. Default is 1 (call).
+        lbd : float or None, optional
+            If provided, use a mixed model with two different eta values.
+            lbd is the weight for the first eta value.
+        eta_2 : float or None, optional
+            If provided, use a mixed model with two different eta values.
+            This is the second eta value. Must be provided if `lbd` is not None.
+        return_opt : str, optional
+            Specifies what to return:
+            - 'price': return the option price.
+            - 'fut': return the VIX future price.
+            - 'both': return both the option price and the VIX future price.
+            Default is 'price'.
+        control_variate : bool, optional
+            If True, use control variate technique to reduce variance. Default is False.
 
         Returns
         -------
         float or np.ndarray
-            Estimated VIX price.
+            Estimated VIX option price.
         """
+        if return_opt not in ["price", "fut", "both"]:
+            raise ValueError("return_opt must be either 'price' or 'fut' or 'both'.")
+
         vix = self.simulate_vix(
             T=T,
             n_mc=n_mc,
@@ -1091,7 +1110,7 @@ class RoughBergomi:
             vix_mc = np.asarray(vix)
             F = np.mean(vix_mc)
 
-        if return_fut:
+        if return_opt == "fut":
             return F
 
         k = np.atleast_1d(np.asarray(k))
@@ -1108,7 +1127,7 @@ class RoughBergomi:
         else:
             price = np.mean(payoff, axis=0)
 
-        return price
+        return price if return_opt == "price" else (price, F)
 
     def price_vix_fut(
         self,
@@ -1148,21 +1167,25 @@ class RoughBergomi:
             Estimated VIX futures price at maturity T.
         """
         return self.price_vix(
-            k=0.0,
             T=T,
             n_mc=n_mc,
             n_disc=n_disc,
             rule=rule,
             seed=seed,
-            opttype=1.0,
             lbd=lbd,
             eta_2=eta_2,
-            return_fut=True,
+            return_opt="fut",
             control_variate=control_variate,
         )
 
     def price_vix_control_variate(
-        self, T: float, n_disc: int, k=0.0, rule="left", opttype=1, return_fut=False
+        self,
+        T: float,
+        n_disc: int,
+        k: float | np.ndarray = 0.0,
+        rule: str = "left",
+        opttype: float | np.ndarray = 1.0,
+        return_fut: bool = False,
     ):
         """
         Price a VIX option using a control variate.
@@ -1176,7 +1199,7 @@ class RoughBergomi:
         ----------
         T : float
             Maturity of the VIX option.
-        k : float
+        k : float or np.ndarray, optional
             Log-moneyness (typically 0 for ATM).
         n_disc : int
             Number of time discretization steps for the simulation.
@@ -1234,8 +1257,31 @@ class RoughBergomi:
 
     def limit_strong_error_vix_right(self, n, T):
         """
-        Compute the limit of the L2 strong error for the VIX option price using the
-        right Riemann sum approximation as n -> infinity.
+        Compute the asymptotic L2 strong error for the VIX option price using the right
+        Riemann sum approximation.
+
+        This function calculates the leading-order term of the strong error (in L2 norm)
+        for the VIX option price when the VIX is discretized using the right Riemann
+        sum, in the limit as the number of discretization steps n goes to infinity.
+        The formula is valid only when the forward variance curve xi0 is flat (i.e.,
+        constant).
+
+        Parameters
+        ----------
+        n : int
+            Number of time discretization steps (must be positive).
+        T : float
+            Maturity of the VIX option (must be positive).
+
+        Returns
+        -------
+        float
+            Leading-order term of the L2 strong error divided by n.
+
+        Raises
+        ------
+        ValueError
+            If xi0_flat is False (i.e., the forward variance curve is not flat).
         """
         if not self.xi0_flat:
             raise ValueError("xi0_flat must be set to True for limit strong error.")
@@ -1256,6 +1302,176 @@ class RoughBergomi:
         )
         coef_lim = 0.5 * self.xi0_0 * lim_strong_error**0.5
         return coef_lim / n
+
+    def compute_mse_atm_price(
+        self,
+        T: float,
+        n_mse: int,
+        true_price: float,
+        true_fut: float,
+        eps: float,
+        opt="mc",
+        rule: str = "trap",
+        seed: int | None = None,
+        n_disc_mlmc_0: int = 1,
+    ):
+        """
+        Compute the mean squared error (MSE) and computational cost for ATM VIX call
+        option pricing using Monte Carlo (MC) or Multilevel Monte Carlo (MLMC) methods.
+
+        This method estimates the MSE of the ATM (at-the-money) VIX option price for a
+        given target accuracy `eps`, comparing the estimated price to a provided
+        reference price (`true_price`). It supports both standard Monte Carlo ("mc")
+        and Multilevel Monte Carlo ("mlmc") approaches, and returns the empirical MSE
+        and the total computational cost.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX option (must be positive).
+        n_mse : int
+            Number of independent MSE replications (must be positive).
+        true_price : float
+            Reference (true) price of the ATM VIX option, used to compute the MSE.
+        true_fut : float
+            Reference (true) price of the ATM VIX future, used as the strike in the
+            payoff.
+        eps : float
+            Target accuracy (root mean squared error) for the estimator (must be
+            positive).
+        opt : str, optional
+            Estimation method: 'mc' for standard Monte Carlo, 'mlmc' for Multilevel
+            Monte Carlo. Default is 'mc'.
+        rule : str, optional
+            Integration rule for the VIX simulation ('left', 'right', or 'trap').
+            Default is 'trap'.
+        seed : int or None, optional
+            Random seed for reproducibility. Default is None.
+        n_disc_mlmc_0 : int, optional
+            Number of time discretization steps for the coarsest MLMC level. Default is
+            1.
+
+        Returns
+        -------
+        tuple
+            mse_mc : float
+                Empirical mean squared error of the ATM VIX option price estimator.
+            cost : float
+                Total computational cost (proportional to the number of simulated paths
+                and time steps).
+
+        Raises
+        ------
+        ValueError
+            If any input parameter is invalid.
+        """
+        if rule not in ["left", "right", "trap"]:
+            raise ValueError("rule must be one of 'left', 'right', or 'trap'.")
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+        if opt not in ["mc", "mlmc"]:
+            raise ValueError("opt must be either 'mc' or 'mlmc'.")
+        if n_mse <= 0:
+            raise ValueError("n_mse must be a positive integer.")
+        if eps <= 0:
+            raise ValueError("eps must be a positive float.")
+        if true_price is None:
+            raise ValueError("true_price must be provided for MSE calculation.")
+        if seed is not None:
+            np.random.seed(seed)
+        else:
+            seed = 1234
+
+        def payoff(x):
+            return np.maximum(x - true_fut, 0.0)
+
+        price_mse = np.zeros(n_mse)
+
+        if opt == "mc":
+            n_mc_eps = np.ceil(eps ** (-2)).astype(int)
+            n_disc_eps = np.ceil(eps ** (-1)).astype(int)
+            print("n_mc_eps:", n_mc_eps)
+            print("n_disc_eps:", n_disc_eps)
+            for i in tqdm(range(n_mse)):
+                seed_i = seed + i
+                vix = self.simulate_vix(
+                    T=T,
+                    n_mc=n_mc_eps,
+                    n_disc=n_disc_eps,
+                    seed=seed_i,
+                    rule=rule,
+                )
+                price_mse[i] = payoff(vix).mean()
+        else:
+            lip = 1.0 / (2.0 * true_fut)  # lipschitz constant for K = F for ATM options
+            lim = self.limit_strong_error_vix_right(n=n_disc_mlmc_0, T=T)
+            c2 = 10 * (lip * lim) ** 2
+            c1 = lip * lim
+            level_max = int(np.ceil(np.log(np.sqrt(2) * c1 / eps) / np.log(2)))
+            if level_max <= 0:
+                raise ValueError("level_max must be >= 1.")
+            n_mc_0 = int(np.ceil((2.0 / eps**2) * c2 * (level_max + 1)))
+            n_disc_eps = np.array(
+                [int(n_disc_mlmc_0 * 2**level) for level in range(level_max + 1)]
+            )
+            if rule in ["left", "right"]:
+                n_mc_eps = np.array(
+                    [
+                        max(1, int(n_mc_0 / 2 ** (2 * level)))
+                        for level in range(level_max + 1)
+                    ]
+                )
+            else:
+                n_mc_eps = np.array(
+                    [
+                        max(1, int(n_mc_0 / 2 ** ((2.0 + self.H) * level)))
+                        for level in range(level_max + 1)
+                    ]
+                )
+
+            print("n_mc_eps:", n_mc_eps)
+            print("n_disc_eps:", n_disc_eps)
+
+            for i in tqdm(range(n_mse)):
+                seed_i = seed + i
+
+                vix_level_0 = self.simulate_vix(
+                    T=T,
+                    n_mc=n_mc_eps[0],
+                    n_disc=n_disc_eps[0],
+                    rule=rule,
+                    seed=seed_i,
+                )
+                price_mlmc = payoff(vix_level_0).mean()
+                for level in range(1, level_max + 1):
+                    xi_level = self.simulate_vix(
+                        T=T,
+                        n_mc=n_mc_eps[level],
+                        n_disc=n_disc_eps[level],
+                        rule=rule,
+                        seed=seed_i,
+                        return_xi=True,
+                    )
+                    xi_level = np.asarray(xi_level)
+                    if rule == "left":
+                        xi_level = xi_level[:-1, :]
+                    elif rule == "right":
+                        xi_level = xi_level[1:, :]
+                    else:
+                        xi_level = 0.5 * (xi_level[:-1, :] + xi_level[1:, :])
+
+                    # extract VIX values at current and previous levels
+                    vix_level_high = np.sqrt(xi_level)
+                    vix_level_low = np.sqrt(xi_level[::2, :])
+                    price_mlmc += (
+                        payoff(vix_level_high).mean() - payoff(vix_level_low).mean()
+                    )
+                price_mse[i] = price_mlmc
+
+        cost = np.sum(n_disc_eps**2 * n_mc_eps)
+        mse_mc = np.mean((price_mse - true_price) ** 2)
+
+        return mse_mc, cost
 
     ####################################################################################
     # Weak approximation methods for VIX pricing
