@@ -544,9 +544,9 @@ class RoughBergomi:
     def implied_vol_from_paths(
         self,
         T: float,
-        int_v_dt,
-        int_sqrt_v_dw,
-        k=0.0,
+        int_v_dt: np.ndarray,
+        int_sqrt_v_dw: np.ndarray,
+        k: float | np.ndarray = 0.0,
         conditioning: bool = False,
         return_skew: bool = False,
     ):
@@ -701,7 +701,7 @@ class RoughBergomi:
             )
         return tab_t_split, (atm_impvol, atm_impvol_skew), (atm_lv, atm_lv_skew)
 
-    def rate_function(self, y, N):
+    def rate_function(self, y: np.ndarray, N: int) -> tuple[np.ndarray, np.ndarray]:
         """
         Compute the rate function minimizing path coefficients for the
         large deviations principle.
@@ -746,7 +746,7 @@ class RoughBergomi:
 
         return tab_a, tab_rate
 
-    def sigma_path_rate_function(self, y, n_trunc):
+    def sigma_path_rate_function(self, y: np.ndarray, n_trunc: int) -> np.ndarray:
         r"""
         Compute sigma(\hat{h}_1^y), where h^y is the Cameron-Martin path minimizing
         the rate function for a given y.
