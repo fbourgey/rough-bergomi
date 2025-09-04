@@ -1,8 +1,10 @@
-import numpy as np
-from scipy import optimize, special, stats, integrate
-from tqdm import tqdm
-import utils
 from collections.abc import Callable
+
+import numpy as np
+from scipy import integrate, optimize, special, stats
+from tqdm import tqdm
+
+import utils
 
 
 class RoughBergomi:
@@ -2520,3 +2522,62 @@ class RoughBergomi:
         gamma_3 -= 0.5 * self.var_proxy_flat(T) ** 2
 
         return gamma_3
+
+        ####################################################################################
+
+    ####################################################################################
+    # VIX implied volatility expansions - Ankush Agarwal and Ying Liao
+    ####################################################################################
+
+    def implied_vol_vix_expansion(self, k, T, order: int = 0):
+        """
+        Compute VIX implied volatility expansion.
+
+        Parameters
+        ----------
+        k : float or array_like
+            Log-moneyness (k = log(K/F)).
+        T : float
+            Time to maturity (T > 0).
+        order : {0, 1, 2}, optional
+            Expansion order (default 0).
+
+        Returns
+        -------
+        float or ndarray
+            Approximated implied volatility, same shape as `k`.
+
+        Raises
+        ------
+        ValueError
+            If `order` not in {0,1,2} or if `T <= 0`.
+        """
+        if order not in [0, 1, 2]:
+            raise ValueError("order must be one of 0, 1, or 2.")
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+
+        def func_d1(x, y, z):
+            return (x - y) / (z * T**0.5) + 0.5 * z * T**0.5
+
+        meanp = self.mean_proxy_flat(T)
+        tot_varp = self.var_proxy_flat(T)
+        volp = np.sqrt(tot_varp / T)
+        # gamma_1 = self.gamma_1_proxy_flat(T)
+        gamma_2 = self.gamma_2_proxy_flat(T)
+        gamma_3 = self.gamma_3_proxy_flat(T)
+        x = np.log(self.price_vix_fut_approx(T=T, order=0))
+        d1 = func_d1(x=0.5 * meanp + 0.125 * tot_varp, y=k, z=0.5 * volp)
+        sig_1 = (0.5 * gamma_2 + 0.25 * gamma_3) / (volp * T)
+        sig_2 = (
+            gamma_3 / (4 * volp * T)
+            - gamma_3 * d1 / (2 * volp**2 * T**1.5)
+            - sig_1**2 * (4 * (x - k) ** 2 / (volp**3 * T) - volp * T / 16.0)
+        )
+
+        if order == 0:
+            return 0.5 * volp + 0.0 * k
+        elif order == 1:
+            return 0.5 * volp + sig_1 + 0.0 * k
+        else:  # order==2
+            return 0.5 * volp + sig_1 + sig_2
