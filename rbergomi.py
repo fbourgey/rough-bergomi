@@ -1794,7 +1794,15 @@ class RoughBergomi:
         return utils.black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
 
     def implied_vol_vix_approx_mixed(
-        self, T, k, order=3, lbd=0.5, eta_2=1.0, n_quad=50, eps=1e-3
+        self,
+        T,
+        k,
+        order=3,
+        lbd=0.5,
+        eta_2=1.0,
+        n_quad=50,
+        eps=1e-3,
+        return_opt="impvol",
     ):
         """
         Compute the implied volatility of a VIX option using a mixed
@@ -1817,14 +1825,21 @@ class RoughBergomi:
             Number of quadrature points for numerical integration (default is 50).
         eps : float, optional
             Tolerance for numerical integration (default is 1e-3).
+        return_opt : str, optional
+            If 'impvol', return only the implied volatility.
+            If 'all', return both the futures price and the implied volatility.
 
         Returns
         -------
-        float
-            Approximated Black-Scholes implied volatility for the VIX option.
+        float or tuple
+            Approximated Black-Scholes implied volatility for the VIX option, or a tuple
+            containing the futures price and the implied volatility if return_opt is
+            'all'.
         """
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
+        if return_opt not in ["impvol", "all"]:
+            raise ValueError("return_opt must be either 'impvol' or 'all'.")
 
         k = np.atleast_1d(np.asarray(k))
         F = self.price_vix_approx_mixed(
@@ -1847,7 +1862,13 @@ class RoughBergomi:
                 for K_i, opttype_i in zip(K, opttype, strict=True)
             ]
         )
-        return utils.black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
+        impvol_approx = utils.black_impvol(
+            K=K, T=T, F=F, value=otm_price, opttype=opttype
+        )
+        if return_opt == "all":
+            return F, impvol_approx
+        else:
+            return impvol_approx
 
     def mean_proxy(self, T, n_quad=30, quad_scipy=True):
         r"""
@@ -2522,8 +2543,6 @@ class RoughBergomi:
         gamma_3 -= 0.5 * self.var_proxy_flat(T) ** 2
 
         return gamma_3
-
-        ####################################################################################
 
     ####################################################################################
     # VIX implied volatility expansions - Ankush Agarwal and Ying Liao

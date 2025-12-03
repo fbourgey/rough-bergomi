@@ -1,7 +1,11 @@
 import numpy as np
-from scipy import optimize, stats
+from scipy import optimize
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy.integrate import quad
+from scipy.interpolate import PchipInterpolator
+from scipy.stats import norm
+from scipy.linalg import inv
 
 # Module-level constants for magic numbers
 IMPVOL_MIN = 1e-10
@@ -106,9 +110,7 @@ def black_price(K, T, F, vol, opttype: float | np.ndarray = 1.0):
     s = vol * T**0.5
     d1 = np.log(F / K) / s + 0.5 * s
     d2 = d1 - s
-    price = opttype * (
-        F * stats.norm.cdf(opttype * d1) - K * stats.norm.cdf(opttype * d2)
-    )
+    price = opttype * (F * norm.cdf(opttype * d1) - K * norm.cdf(opttype * d2))
     return price
 
 
@@ -136,7 +138,7 @@ def black_delta(K, T, F, vol, opttype=1):
     """
     s = vol * T**0.5
     d1 = np.log(F / K) / s + 0.5 * s
-    return opttype * stats.norm.cdf(opttype * d1)
+    return opttype * norm.cdf(opttype * d1)
 
 
 def black_gamma(K, T, F, vol):
@@ -161,7 +163,7 @@ def black_gamma(K, T, F, vol):
     """
     s = vol * T**0.5
     d1 = np.log(F / K) / s + 0.5 * s
-    return stats.norm.pdf(d1) / (F * s)
+    return norm.pdf(d1) / (F * s)
 
 
 def black_speed(K, T, F, vol):
@@ -186,7 +188,7 @@ def black_speed(K, T, F, vol):
     """
     s = vol * T**0.5
     d1 = np.log(F / K) / s + 0.5 * s
-    return -(d1 / s + 1.0) * stats.norm.pdf(d1) / (F**2 * s)
+    return -(d1 / s + 1.0) * norm.pdf(d1) / (F**2 * s)
 
 
 def black_vega(K, T, F, vol):
@@ -211,7 +213,7 @@ def black_vega(K, T, F, vol):
     """
     s = vol * T**0.5
     d1 = np.log(F / K) / s + 0.5 * s
-    return F * stats.norm.pdf(d1) * np.sqrt(T)
+    return F * norm.pdf(d1) * np.sqrt(T)
 
 
 @np.vectorize
@@ -252,9 +254,7 @@ def black_impvol_brentq(K, T, F, value, opttype=1):
         return np.nan
 
 
-def black_impvol(
-    K, T, F, value, opttype: int | np.ndarray = 1, TOL=1e-5, MAX_ITER=1000
-):
+def black_impvol(K, T, F, value, opttype=1, TOL=1e-6, MAX_ITER=1000):
     """
     Calculate the Black implied volatility using a bisection method.
 
@@ -297,8 +297,7 @@ def black_impvol(
     if K.shape != value.shape:
         raise ValueError("K and value must have the same shape.")
 
-    # Fix: check all opttype values
-    if not np.all(np.abs(opttype) == 1):
+    if np.abs(opttype).any() != 1:
         raise ValueError("opttype must be either 1 or -1.")
 
     F = float(F)
@@ -307,8 +306,8 @@ def black_impvol(
     if T <= 0 or F <= 0:
         return np.full_like(K, np.nan)
 
-    low = IMPVOL_MIN * np.ones_like(K)
-    high = IMPVOL_MAX * np.ones_like(K)
+    low = 1e-10 * np.ones_like(K)
+    high = 5.0 * np.ones_like(K)
     mid = 0.5 * (low + high)
     for _ in range(MAX_ITER):
         price = black_price(K, T, F, mid, opttype)
@@ -322,12 +321,12 @@ def black_impvol(
         low[~mask] = mid[~mask]
         mid = 0.5 * (low + high)
 
-    raise ValueError("Implied volatility did not converge.")
+    # Set mid to NaN where the tolerance is not met
+    mid = np.where(np.abs(diff) < TOL, mid, np.nan)
+    return mid
 
 
-def black_otm_impvol_mc(
-    S: np.ndarray, k: float | np.ndarray, T: float, mc_error: bool = False
-) -> dict | np.ndarray:
+def black_otm_impvol_mc(S, T, k=np.zeros(1), mc_error=False, return_atm_skew=False):
     """
     Calculate Black implied volatility using Monte Carlo simulated stock prices and
     out-of-the-money (OTM) prices.
@@ -356,11 +355,22 @@ def black_otm_impvol_mc(
                       prices.
         - 'otm_price': ndarray of the calculated OTM option prices.
     """
-    k = np.atleast_1d(k)
+    k = np.atleast_1d(np.asarray(k))
     F = np.mean(S)
+
+    if return_atm_skew:
+        # compute atm skew
+        atm_call = np.mean(np.maximum(S - F, 0.0))
+        atm_impvol = black_impvol(K=F, T=T, F=F, value=atm_call, opttype=1)
+        w = T * atm_impvol**2
+        atm_digit = np.mean(S >= F)
+        atm_skew = norm.cdf(-0.5 * w**0.5) - atm_digit
+        atm_skew /= T**0.5 * norm.pdf(-0.5 * w**0.5)
+
+        return atm_impvol, atm_skew
+
     K = F * np.exp(k)
-    # opttype: 1 for call, -1 for put, depending on moneyness
-    opttype = 2 * (K >= F) - 1  # 1 if K >= F (call), -1 if K < F (put)
+    opttype = 2 * (K >= F) - 1
     payoff = np.maximum(opttype[None, :] * (S[:, None] - K[None, :]), 0.0)
     otm_price = np.mean(payoff, axis=0)
     otm_impvol = black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
@@ -469,3 +479,103 @@ def linear_regression(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
     beta = cov_x_y / var_x
     alpha = y.mean() - beta * x.mean()
     return alpha, beta
+
+
+def var_swap_robust(ivol_data, slices=None):
+    """Robust estimation of variance swap quotes."""
+    ivol_data = ivol_data.dropna()
+    bid_vols = ivol_data["Bid"].astype(float)
+    ask_vols = ivol_data["Ask"].astype(float)
+    exp_dates = np.sort(np.unique(ivol_data["Texp"]))
+    n_slices = len(exp_dates)
+
+    if slices is not None:
+        n_slices = len(slices)
+    else:
+        slices = range(n_slices)
+
+    vs_mid = np.zeros(n_slices)
+    vs_bid = np.zeros(n_slices)
+    vs_ask = np.zeros(n_slices)
+
+    def varswap(k_in, vol_series, slice_idx):
+        t = exp_dates[slice_idx]
+        sig_in = vol_series * np.sqrt(t)
+        zm_in = -k_in / sig_in - sig_in / 2
+        y_in = norm.cdf(zm_in)
+        ord_y_in = np.argsort(y_in)
+        sig_in_y = sig_in[ord_y_in]
+        y_min = np.min(y_in)
+        y_max = np.max(y_in)
+        sig_in_0 = sig_in_y[0]
+        sig_in_1 = sig_in_y[-1]
+
+        wbar_flat = quad(PchipInterpolator(np.sort(y_in), sig_in_y**2), y_min, y_max)[0]
+        res_mid = wbar_flat
+        z_minus = zm_in[ord_y_in][0]
+        res_lh = sig_in_0**2 * norm.cdf(z_minus)
+        z_plus = zm_in[ord_y_in][-1]
+        res_rh = sig_in_1**2 * norm.cdf(-z_plus)
+
+        res_vs = res_mid + res_lh + res_rh
+        return res_vs
+
+    for slice_idx in slices:
+        t = exp_dates[slice_idx]
+        texp = ivol_data["Texp"]
+        bid_vol = bid_vols[texp == t].to_numpy()
+        ask_vol = ask_vols[texp == t].to_numpy()
+        mid_vol = (bid_vol + ask_vol) / 2
+        F = ivol_data["Fwd"][texp == t].iloc[0]  # forward price
+        k = np.log(ivol_data["Strike"][texp == t].to_numpy() / F)  # log-fwd moneyness
+        vs_mid[slice_idx] = varswap(k, mid_vol, slice_idx) / t
+        vs_bid[slice_idx] = varswap(k, bid_vol, slice_idx) / t
+        vs_ask[slice_idx] = varswap(k, ask_vol, slice_idx) / t
+
+    return {
+        "expiries": exp_dates,
+        "vs_mid": vs_mid,
+        "vs_bid": vs_bid,
+        "vs_ask": vs_ask,
+    }
+
+
+def xi_curve_smooth(expiries, w_in, xi=True, eps=0.0):
+    def phi(tau):
+        def func(x):
+            min_val = np.minimum(x, tau)
+            return 1 - min_val**3 / 6 + x * tau * (2 + min_val) / 2
+
+        return func
+
+    def phi_deri(tau):
+        def func(x):
+            min_val = np.minimum(x, tau)
+            return tau - min_val**2 / 2 + tau * min_val
+
+        return func
+
+    n = len(expiries)
+    A = np.array([[phi(expiries[i])(expiries[j]) for j in range(n)] for i in range(n)])
+    A_inv = inv(A)
+
+    def obj_1(err_vec):
+        v = w_in + 2 * np.sqrt(w_in) * err_vec * np.sqrt(expiries)
+        return v.T @ A_inv @ v
+
+    res_optim = optimize.minimize(
+        obj_1, np.zeros(n), method="L-BFGS-B", bounds=[(-eps, eps)] * n
+    )
+    err_vec = res_optim.x
+    w_in_1 = w_in + 2 * np.sqrt(w_in) * err_vec * np.sqrt(expiries)
+    Z = A_inv @ w_in_1
+
+    def curve_raw(x):
+        sum_curve = sum(Z[i] * phi(expiries[i])(x) for i in range(n))
+        sum_curve_deri = sum(Z[i] * phi_deri(expiries[i])(x) for i in range(n))
+        return sum_curve_deri if xi else sum_curve
+
+    xi_curve_out = np.vectorize(curve_raw)
+    fit_errs = np.sqrt(w_in_1 / expiries) - np.sqrt(w_in / expiries)
+
+    return {"xi_curve": xi_curve_out, "fit_errs": fit_errs, "w_out": w_in_1}
