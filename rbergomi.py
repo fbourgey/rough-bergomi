@@ -38,6 +38,7 @@ class RoughBergomi:
         H: float,
         eta: float,
         rho: float,
+        delta_vix: float = 1.0 / 12.0,
     ) -> None:
         """
         Initialize the rough Bergomi model.
@@ -65,7 +66,7 @@ class RoughBergomi:
         self.H = H
         self.eta = eta
         self.rho = rho
-        self.delta_vix = 1.0 / 12.0
+        self.delta_vix = delta_vix
 
     def _is_xi0_flat(self) -> bool:
         """Check if the forward variance curve xi0 is flat."""

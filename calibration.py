@@ -20,22 +20,14 @@ def fun(
 
     xi0, H, eta_1, eta_2, lbd = x
 
-    def fxi0(u):
-        return (
-            0.04139184 * (u < 37 / 365.0)
-            + 0.04710356 * (u >= 37 / 365.0) * (u < 44 / 365.0)
-            + xi0 * (u >= 44 / 365.0)
-        )
-
     params = {
         "s0": 1.0,
-        # "xi0": lambda u: xi0 * np.ones_like(u),
-        "xi0": fxi0,
+        "xi0": lambda u: xi0 * np.ones_like(u),
         "rho": -0.7,
         "H": H,
         "eta": eta_1,
     }
-    rbergomi = RoughBergomi(**params)
+    rbergomi = RoughBergomi(**params, delta_vix=30 / 365.25)
 
     F_approx, impvols_approx = rbergomi.implied_vol_vix_approx_mixed(
         lbd=lbd,
