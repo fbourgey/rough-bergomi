@@ -20,11 +20,17 @@ def fun(
 
     xi0, H, eta_1, eta_2, lbd = x
 
-    xi0 = 0.04139184
+    def fxi0(u):
+        return (
+            0.04139184 * (u < 37 / 365.0)
+            + 0.04710356 * (u >= 37 / 365.0) * (u < 44 / 365.0)
+            + xi0 * (u >= 44 / 365.0)
+        )
 
     params = {
         "s0": 1.0,
-        "xi0": lambda u: xi0 * np.ones_like(u),
+        # "xi0": lambda u: xi0 * np.ones_like(u),
+        "xi0": fxi0,
         "rho": -0.7,
         "H": H,
         "eta": eta_1,
