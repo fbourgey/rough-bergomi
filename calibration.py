@@ -1,7 +1,6 @@
 import numpy as np
 from rbergomi import RoughBergomi
 from scipy.optimize import least_squares
-from scipy import interpolate
 
 
 def fun(
@@ -16,7 +15,38 @@ def fun(
     return_error=True,
     weights=None,
 ):
-    """Objective function to minimize."""
+    """
+    Compute residuals between market and model VIX futures and implied volatilities.
+
+    Parameters
+    ----------
+    x : array_like
+        Model parameters [xi0, H, eta_1, eta_2, lbd].
+    K : array_like
+        Strike prices.
+    F : float
+        VIX futures price.
+    impvols : array_like
+        Market implied volatilities.
+    T : float
+        Time to maturity (years).
+    ORDER : int, optional
+        Expansion order (default 3).
+    EPS : float, optional
+        Integration tolerance (default 1e-3).
+    N_QUAD : int, optional
+        Number of quadrature points (default 50).
+    return_error : bool, optional
+        If True, return errors; if False, return model prices. Default is True.
+    weights : array_like, optional
+        Weights for implied volatility errors. Default is None.
+
+    Returns
+    -------
+    array_like
+        Residual errors [error_F, error_impvols] if return_error=True,
+        else (F_approx, impvols_approx).
+    """
     k = np.log(K / F)
 
     xi0, H, eta_1, eta_2, lbd = x
@@ -65,7 +95,35 @@ def optimize_calibration(
     N_QUAD=50,
     weights=None,
 ):
-    """Optimize the calibration parameters."""
+    """
+    Calibrate Mixed Rough Bergomi model to single-day VIX smile data.
+
+    Parameters
+    ----------
+    x0 : array_like
+        Initial guess [xi0, H, eta_1, eta_2, lbd].
+    K : array_like
+        Strike prices.
+    F : float
+        VIX futures price.
+    impvols : array_like
+        Market implied volatilities.
+    T : float
+        Time to maturity (years).
+    ORDER : int, optional
+        Expansion order (default 3).
+    EPS : float, optional
+        Integration tolerance (default 1e-3).
+    N_QUAD : int, optional
+        Number of quadrature points (default 50).
+    weights : array_like, optional
+        Weights for implied volatility errors (default None).
+
+    Returns
+    -------
+    OptimizeResult
+        Optimization result from scipy.optimize.least_squares.
+    """
 
     # H, eta_1, eta_2, lbd
     result = least_squares(
@@ -95,7 +153,34 @@ def fun_all(
     return_error=True,
     weights=False,
 ):
-    """Objective function to minimize."""
+    """
+    Compute residuals across multiple days with parametric forward variance curve.
+
+    Parameters
+    ----------
+    x : array_like
+        Model parameters [b0, b1, b2, tau1, tau2, H, eta_1, eta_2, lbd].
+    days : array_like
+        Days to maturity (in calendar days).
+    voldata : dict
+        Volatility data indexed by day, containing 'k', 'F', 'Mid', and 'weights'.
+    ORDER : int, optional
+        Expansion order (default 3).
+    EPS : float, optional
+        Integration tolerance (default 1e-3).
+    N_QUAD : int, optional
+        Number of quadrature points (default 50).
+    return_error : bool, optional
+        If True, return errors; if False, return model prices (default True).
+    weights : bool, optional
+        If True, apply weights from voldata (default False).
+
+    Returns
+    -------
+    array_like
+        Concatenated residual errors across all days if return_error=True,
+        else (Fs_approx, impvols_approx).
+    """
 
     # x = b0, b1, b2, tau1, tau2, H, eta_1, eta_2, lbd
 
@@ -159,7 +244,31 @@ def optimize_calibration_all(
     N_QUAD=50,
     weights=False,
 ):
-    """Optimize the calibration parameters."""
+    """
+    Calibrate Mixed Rough Bergomi model to multi-day VIX smile data.
+
+    Parameters
+    ----------
+    x0 : array_like
+        Initial guess [b0, b1, b2, tau1, tau2, H, eta_1, eta_2, lbd].
+    days : array_like
+        Days to maturity (in calendar days).
+    voldata : dict
+        Volatility data indexed by day.
+    ORDER : int, optional
+        Expansion order (default 3).
+    EPS : float, optional
+        Integration tolerance (default 1e-3).
+    N_QUAD : int, optional
+        Number of quadrature points (default 50).
+    weights : bool, optional
+        If True, apply weights from voldata (default False).
+
+    Returns
+    -------
+    OptimizeResult
+        Optimization result from scipy.optimize.least_squares.
+    """
 
     # x = b0, b1, b2, tau1, tau2, H, eta_1, eta_2, lbd
 
