@@ -1522,8 +1522,8 @@ class RoughBergomi:
         if order == 3:
             gamma_3 = self.gamma_3_proxy(T=T)
 
-        meanp = self.mean_proxy_flat(T) + np.log(self.fut_vix2(T))
-        tot_varp = self.var_proxy_flat(T)
+        meanp = self.mean_proxy(T) + np.log(self.fut_vix2(T))
+        tot_varp = self.var_proxy(T)
         volp = np.sqrt(tot_varp / T)
         S = np.exp(0.5 * meanp + 0.125 * tot_varp)
 
@@ -1590,25 +1590,25 @@ class RoughBergomi:
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
 
-        meanp = self.mean_proxy_flat(T) + np.log(self.fut_vix2(T))
-        tot_varp = self.var_proxy_flat(T)
+        meanp = self.mean_proxy(T) + np.log(self.fut_vix2(T))
+        tot_varp = self.var_proxy(T)
         S = np.exp(meanp / 2.0 + tot_varp / 8.0)
         # order 0
         price_0 = S
         if order == 0:
             return price_0
         # order 1
-        gamma_1 = self.gamma_1_proxy_flat(T=T)
+        gamma_1 = self.gamma_1_proxy(T=T)
         price_1 = 0.5 * S
         if order == 1:
             return price_0 + gamma_1 * price_1
         # order 2
-        gamma_2 = self.gamma_2_proxy_flat(T=T)
+        gamma_2 = self.gamma_2_proxy(T=T)
         price_2 = 0.25 * S
         if order == 2:
             return price_0 + gamma_1 * price_1 + gamma_2 * price_2
         # order 3
-        gamma_3 = self.gamma_3_proxy_flat(T=T)
+        gamma_3 = self.gamma_3_proxy(T=T)
         price_3 = 0.125 * S
         if order == 3:
             return price_0 + gamma_1 * price_1 + gamma_2 * price_2 + gamma_3 * price_3
@@ -2577,27 +2577,18 @@ class RoughBergomi:
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
 
-        def func_d1(x, y, z):
-            return (x - y) / (z * T**0.5) + 0.5 * z * T**0.5
-
-        meanp = self.mean_proxy_flat(T)
-        tot_varp = self.var_proxy_flat(T)
-        volp = np.sqrt(tot_varp / T)
-        # gamma_1 = self.gamma_1_proxy_flat(T)
-        gamma_2 = self.gamma_2_proxy_flat(T)
-        gamma_3 = self.gamma_3_proxy_flat(T)
-        x = np.log(self.price_vix_fut_approx(T=T, order=0))
-        d1 = func_d1(x=0.5 * meanp + 0.125 * tot_varp, y=k, z=0.5 * volp)
-        sig_1 = (0.5 * gamma_2 + 0.25 * gamma_3) / (volp * T)
-        sig_2 = (
-            gamma_3 / (4 * volp * T)
-            - gamma_3 * d1 / (2 * volp**2 * T**1.5)
-            - sig_1**2 * (4 * (x - k) ** 2 / (volp**3 * T) - volp * T / 16.0)
-        )
+        tot_var_proxy = self.var_proxy(T)
+        vol_proxy = np.sqrt(tot_var_proxy / T)
+        gamma_2 = self.gamma_2_proxy(T)
+        gamma_3 = self.gamma_3_proxy(T)
+        xp = 0.5 * self.mean_proxy(T) + tot_var_proxy / 8
 
         if order == 0:
-            return 0.5 * volp + 0.0 * k
-        elif order == 1:
-            return 0.5 * volp + sig_1 + 0.0 * k
-        else:  # order==2
-            return 0.5 * volp + sig_1 + sig_2
+            return 0.5 * vol_proxy + 0.0 * k
+        else:
+            return (
+                0.5 * vol_proxy
+                + gamma_2 / (2 * vol_proxy * T)
+                + 3 * gamma_3 / (8 * vol_proxy * T)
+                - gamma_3 * (xp - k) / (vol_proxy**3 * T**2)
+            )
