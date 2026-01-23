@@ -579,3 +579,50 @@ def xi_curve_smooth(expiries, w_in, xi=True, eps=0.0):
     fit_errs = np.sqrt(w_in_1 / expiries) - np.sqrt(w_in / expiries)
 
     return {"xi_curve": xi_curve_out, "fit_errs": fit_errs, "w_out": w_in_1}
+
+
+def xi0_heston(
+    t,
+    shape="flat",
+    lbd_xi0=7.0,
+    v0_flat=0.025,
+    v0_contango=0.005,
+    v0_backwardation=0.045,
+):
+    """
+    Compute the initial forward variance curve for the Heston model with
+    different shapes ("flat", "contango", "backwardation").
+
+    Parameters
+    ----------
+    t : float or ndarray
+        Time(s) at which to evaluate the initial volatility.
+    shape : str, optional
+        Term structure shape: "flat", "contango", or "backwardation". Default is "flat".
+    lbd_xi0 : float, optional
+        Decay rate for the term structure. Default is 7.0.
+    v0_flat : float, optional
+        Flat volatility level. Default is 0.025.
+    v0_contango : float, optional
+        Initial volatility for contango shape. Default is 0.005.
+    v0_backwardation : float, optional
+        Initial volatility for backwardation shape. Default is 0.045.
+
+    Returns
+    -------
+    ndarray
+        Initial volatility value(s) evaluated at time(s) t.
+
+    Raises
+    ------
+    ValueError
+        If shape is not "flat", "contango", or "backwardation".
+    """
+    if shape == "flat":
+        return v0_flat + 0.0 * t
+    elif shape == "contango":
+        return v0_flat + (v0_contango - v0_flat) * np.exp(-lbd_xi0 * t)
+    elif shape == "backwardation":
+        return v0_flat + (v0_backwardation - v0_flat) * np.exp(-lbd_xi0 * t)
+    else:
+        raise ValueError("Unknown shape")

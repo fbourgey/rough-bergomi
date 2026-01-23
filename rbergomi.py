@@ -33,11 +33,11 @@ class RoughBergomi:
 
     def __init__(
         self,
-        s0: float,
         xi0: Callable[[np.ndarray], np.ndarray],
         H: float,
         eta: float,
         rho: float,
+        s0: float = 1.0,
         delta_vix: float = 1.0 / 12.0,
     ) -> None:
         """
