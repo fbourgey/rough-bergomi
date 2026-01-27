@@ -1616,7 +1616,7 @@ class RoughBergomi:
         raise ValueError("Invalid order specified for VIX futures price approximation.")
 
     def price_vix_approx_mixed(
-        self, T, K, lbd, eta_2, opt_payoff, order=3, n_quad: int = 50, eps=1e-3
+        self, T, lbd, eta_2, opt_payoff, K=0.0, order=3, n_quad: int = 50, eps=1e-3
     ) -> float:
         """
         Price a VIX option in the mixed case using the weak approximation.
@@ -1625,15 +1625,15 @@ class RoughBergomi:
         ----------
         T : float
             Maturity of the VIX option.
-        K : float
-            Strike of the VIX option.
         lbd : float
             Mixing parameter between the two regimes.
         eta_2 : float
             Volatility of volatility parameter for the second exponential.
-        opt_payoff : callable
-            Payoff function of the option, e.g., lambda x: np.maximum(x - K, 0)
-            for a call.
+        opt_payoff : str
+            Payoff function of the option, e.g., "call" for a call option. Use "put"
+            for a put option, or "fut" for a future payoff.
+        K : float, optional (default is 0.0)
+            Strike of the VIX option.
         order : int, optional
             Order of the approximation expansion (default is 3).
         n_quad : int, optional
@@ -1754,6 +1754,49 @@ class RoughBergomi:
             return price_0 + price_1 + price_2 + price_3
 
         raise ValueError("Invalid order specified for VIX option price approximation.")
+
+    def price_vix_approx_mixed_order_0(
+        self, T, lbd, eta_2, opt_payoff, K=0.0, n_quad: int = 50
+    ):
+        rbergomi_eta_2 = self.__class__(
+            s0=self.s0, xi0=self.xi0, H=self.H, eta=eta_2, rho=self.rho
+        )
+        meanp_1 = self.mean_proxy_flat(T)
+        meanp_2 = rbergomi_eta_2.mean_proxy_flat(T)
+        sigp_1 = self.var_proxy_flat(T) ** 0.5
+        sigp_2 = rbergomi_eta_2.var_proxy_flat(T) ** 0.5
+
+        print("meanp_1:", meanp_1)
+        print("meanp_2:", meanp_2)
+        print("sigp_1:", sigp_1)
+        print("sigp_2:", sigp_2)
+
+        def hfunc(x):
+            return lbd * np.exp(meanp_1 + sigp_1 * x) + (1 - lbd) * np.exp(
+                meanp_2 + sigp_2 * x
+            )
+
+        def hinv(y):
+            from scipy import optimize
+
+            func = lambda x: hfunc(x) - y
+            return optimize.root_scalar(func, bracket=[-100, 100.0]).root
+
+        A = hinv(K**2)
+        B = A - sigp_2 / 2
+
+        x_leg, w_leg = utils.gauss_legendre(stats.norm.cdf(B), 1, n_quad)
+        x_leg = stats.norm.ppf(x_leg)
+        a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
+        b = (lbd / (1 - lbd)) * np.exp(
+            meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
+        )
+        c = sigp_1 - sigp_2
+        price_call_0 = a * np.sum(
+            w_leg * (1 + b * np.exp(c * x_leg)) ** 0.5
+        ) - K * stats.norm.cdf(-A)
+
+        return price_call_0
 
     def implied_vol_vix_approx(self, T, k, order=3):
         """
