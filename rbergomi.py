@@ -1616,7 +1616,14 @@ class RoughBergomi:
         raise ValueError("Invalid order specified for VIX futures price approximation.")
 
     def price_vix_approx_mixed(
-        self, T, lbd, eta_2, opt_payoff, K=0.0, order=3, n_quad: int = 50, eps=1e-4
+        self,
+        T,
+        lbd,
+        eta_2,
+        opt_payoff,
+        K=0.0,
+        order=3,
+        n_quad: int = 50,
     ):
         """
         Price a VIX option in the mixed case using the weak approximation.
@@ -1638,8 +1645,6 @@ class RoughBergomi:
             Order of the approximation expansion (default is 3).
         n_quad : int, optional
             Number of quadrature points for numerical integration (default is 50).
-        eps : float, optional
-            Finite-difference parameter for numerical integration (default is 1e-3).
 
         Returns
         -------
@@ -1669,21 +1674,51 @@ class RoughBergomi:
         sigp_1 = self.var_proxy(T) ** 0.5
         sigp_2 = rb_eta_2.var_proxy(T) ** 0.5
 
+        # mean proxy minus log E[VIX_T^2] with eta=1
+        mu0 = -(meanp_1 - np.log(fvix2)) / self.eta**2.0
+
+        def inner_mixed(x, y, lbd, e1, e2, meanp_1, fvix2):
+            term1 = lbd * np.exp(x + y)
+            term2 = (1 - lbd) * np.exp(
+                e2 * (e1 - e2) * mu0 + (1 - e2 / e1) * np.log(fvix2) + (e2 / e1) * x
+            )
+            return term1 + term2
+
         # Payoff function
         if opt_payoff == "fut":
 
             def payoff(x):
                 return np.sqrt(x)
 
+            def dpayoff_mixed_dy(x, y, lbd, e1, e2):
+                inner = inner_mixed(x, y, lbd, e1, e2, meanp_1, fvix2)
+                return lbd * np.exp(x + y) / (2.0 * inner**0.5)
+
         if opt_payoff == "call":
 
             def payoff(x):
                 return np.maximum(np.sqrt(x) - K, 0.0)
 
+            def dpayoff_mixed_dy(x, y, lbd, e1, e2):
+                inner = inner_mixed(x, y, lbd, e1, e2, meanp_1, fvix2)
+                sqrt_inner = np.sqrt(inner)
+                if sqrt_inner <= K:
+                    return 0.0
+                else:
+                    return lbd * np.exp(x + y) / (2.0 * sqrt_inner)
+
         if opt_payoff == "put":
 
             def payoff(x):
                 return np.maximum(K - np.sqrt(x), 0.0)
+
+            def dpayoff_mixed_dy(x, y, lbd, e1, e2):
+                inner = inner_mixed(x, y, lbd, e1, e2, meanp_1, fvix2)
+                sqrt_inner = np.sqrt(inner)
+                if sqrt_inner >= K:
+                    return 0.0
+                else:
+                    return -lbd * np.exp(x + y) / (2.0 * sqrt_inner)
 
         # quadrature nodes and weights
         if opt_payoff == "fut":
@@ -1714,29 +1749,19 @@ class RoughBergomi:
         if order == 0:
             return price_0
 
-        # mean proxy minus log E[VIX_T^2] with eta=1
-        mu0 = -(meanp_1 - np.log(fvix2)) / self.eta**2.0
-
-        def payoff_mixed(x, y, lbd, e1, e2):
-            return payoff(
-                lbd * np.exp(x + y)
-                + (1 - lbd)
-                * np.exp(
-                    e2 * (e1 - e2) * mu0 + (1 - e2 / e1) * np.log(fvix2) + (e2 / e1) * x
-                )
-            )
-
         def psi(x, idx=1):
-            if idx == 1:
-
-                def f_idx(y):
-                    return payoff_mixed(meanp_1 + sigp_1 * x, y, lbd, eta_1, eta_2)
-            else:
-
-                def f_idx(y):
-                    return payoff_mixed(meanp_2 + sigp_2 * x, y, 1 - lbd, eta_2, eta_1)
-
-            return (f_idx(eps) - f_idx(-eps)) / (2.0 * eps)
+            return (
+                dpayoff_mixed_dy(
+                    x=meanp_1 + sigp_1 * x if idx == 1 else meanp_2 + sigp_2 * x,
+                    y=0.0,
+                    lbd=lbd if idx == 1 else 1 - lbd,
+                    e1=eta_1 if idx == 1 else eta_2,
+                    e2=eta_2 if idx == 1 else eta_1,
+                )
+                * sigp_1
+                if idx == 1
+                else sigp_2
+            )
 
         # order 1
         gamma_1_1 = self.gamma_1_proxy(T=T)
@@ -1776,50 +1801,6 @@ class RoughBergomi:
 
         if order == 3:
             return price_0 + price_1 + price_2 + price_3
-
-    def price_vix_approx_mixed_order_0(
-        self, T, lbd, eta_2, opt_payoff, K=0.0, n_quad: int = 50
-    ):
-        rb_eta_2 = self.__class__(
-            s0=self.s0, xi0=self.xi0, H=self.H, eta=eta_2, rho=self.rho
-        )
-        fvix2 = self.fut_vix2(T)
-        meanp_1 = np.log(fvix2) + self.mean_proxy(T)
-        meanp_2 = np.log(fvix2) + rb_eta_2.mean_proxy(T)
-        sigp_1 = self.var_proxy(T) ** 0.5
-        sigp_2 = rb_eta_2.var_proxy(T) ** 0.5
-
-        print("meanp_1:", meanp_1)
-        print("meanp_2:", meanp_2)
-        print("sigp_1:", sigp_1)
-        print("sigp_2:", sigp_2)
-
-        def hfunc(x):
-            return lbd * np.exp(meanp_1 + sigp_1 * x) + (1 - lbd) * np.exp(
-                meanp_2 + sigp_2 * x
-            )
-
-        def hinv(y):
-            from scipy import optimize
-
-            func = lambda x: hfunc(x) - y
-            return optimize.root_scalar(func, bracket=[-100, 100.0]).root
-
-        A = hinv(K**2)
-        B = A - sigp_2 / 2
-
-        x_leg, w_leg = utils.gauss_legendre(stats.norm.cdf(B), 1, n_quad)
-        x_leg = stats.norm.ppf(x_leg)
-        a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
-        b = (lbd / (1 - lbd)) * np.exp(
-            meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
-        )
-        c = sigp_1 - sigp_2
-        price_call_0 = a * np.sum(
-            w_leg * (1 + b * np.exp(c * x_leg)) ** 0.5
-        ) - K * stats.norm.cdf(-A)
-
-        return price_call_0
 
     def implied_vol_vix_approx(self, T, k, order=3):
         """
