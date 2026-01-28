@@ -1726,15 +1726,8 @@ class RoughBergomi:
             nodes, weights = utils.gauss_hermite(n_quad)
         else:
             # Gauss-Legendre quadrature for call/put payoff
-            def hinv(y):
-                return optimize.root_scalar(
-                    lambda x: lbd * np.exp(meanp_1 + sigp_1 * x)
-                    + (1 - lbd) * np.exp(meanp_2 + sigp_2 * x)
-                    - y,
-                    bracket=[-100, 100],
-                ).root
 
-            A = hinv(K**2)
+            A = inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
             B = A - sigp_2 / 2
             left = stats.norm.cdf(B) if opt_payoff == "call" else 0.0
             right = 1.0 if opt_payoff == "call" else stats.norm.cdf(B)
@@ -1807,29 +1800,49 @@ class RoughBergomi:
         T,
         lbd,
         eta_2,
-        opt_payoff,
         K=0.0,
-        order=3,
         n_quad: int = 50,
-        n_hermite: int = 20,
+        n_trunc: int = 20,
+        opt_payoff="call",
     ):
         """
         Price a VIX option in the mixed case using Hermite series.
         """
-        # TODO: finish implementation. Add generic functio to get A = h^{-1}(K^2)
-        # and one computing hermite coefficients.
-        # create rBergomi model with eta=eta_2
+        # TODO: finish implementation.
+
+        if opt_payoff not in ["call", "put"]:
+            raise ValueError("opt_payoff must be either 'call' or 'put'.")
+
         rb_eta_2 = self.__class__(
             s0=self.s0, xi0=self.xi0, H=self.H, eta=eta_2, rho=self.rho
         )
         fvix2 = self.fut_vix2(T)
-        eta_1 = self.eta
         meanp_1 = np.log(fvix2) + self.mean_proxy(T)
         meanp_2 = np.log(fvix2) + rb_eta_2.mean_proxy(T)
         sigp_1 = self.var_proxy(T) ** 0.5
         sigp_2 = rb_eta_2.var_proxy(T) ** 0.5
-        w0 = self.price_vix_approx_mixed(T, lbd, eta_2, "fut", order=0)
-        pass
+
+        a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
+        b = (lbd / (1 - lbd)) * np.exp(
+            meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
+        )
+        c = sigp_1 - sigp_2
+        A = inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+        B = A - sigp_2 / 2
+
+        weights_herm = hermite_polynomial_weights(n_trunc, b, c, n_quad)
+
+        I_N_B = weights_herm[0] * stats.norm.cdf(-B) + np.sum(
+            weights_herm[1:]
+            * special.eval_hermitenorm(np.arange(n_trunc), B)
+            * stats.norm.pdf(B)
+        )
+
+        if opt_payoff == "call":
+            return a * I_N_B - K * stats.norm.cdf(-A)
+
+        if opt_payoff == "put":
+            raise ValueError("Put option not yet implemented in hermite method.")
 
     def implied_vol_vix_approx(self, T, k, order=3):
         """
@@ -1878,7 +1891,6 @@ class RoughBergomi:
         lbd=0.5,
         eta_2=1.0,
         n_quad=50,
-        eps=1e-3,
         return_opt="impvol",
     ):
         """
@@ -1900,8 +1912,6 @@ class RoughBergomi:
             (default is 1.0).
         n_quad : int, optional
             Number of quadrature points for numerical integration (default is 50).
-        eps : float, optional
-            Tolerance for numerical integration (default is 1e-3).
         return_opt : str, optional
             If 'impvol', return only the implied volatility.
             If 'all', return both the futures price and the implied volatility.
@@ -1934,7 +1944,6 @@ class RoughBergomi:
                     opt_payoff="call" if opttype_i == 1 else "put",
                     order=order,
                     n_quad=n_quad,
-                    eps=eps,
                 )
                 for K_i, opttype_i in zip(K, opttype, strict=True)
             ]
@@ -2668,3 +2677,67 @@ class RoughBergomi:
                 + 3 * gamma_3 / (8 * vol_proxy * T)
                 - gamma_3 * (xp - k) / (vol_proxy**3 * T**2)
             )
+
+
+def inverse_mixture_lognormal(y, lbd, mu_1, mu_2, sig_1, sig_2):
+    """
+    Solve for x in the mixture of lognormals equation.
+
+    Finds x such that:
+        lbd * exp(mu_1 + sig_1 * x) + (1 - lbd) * exp(mu_2 + sig_2 * x) = y
+
+    Parameters
+    ----------
+    y : float
+        Target value.
+    lbd : float
+        Mixing weight in [0, 1].
+    mu_1, mu_2 : float
+        Location parameters of the two lognormal components.
+    sig_1, sig_2 : float
+        Scale parameters of the two lognormal components.
+
+    Returns
+    -------
+    float
+        Solution x to the mixture equation.
+    """
+    return optimize.root_scalar(
+        lambda x: lbd * np.exp(mu_1 + sig_1 * x)
+        + (1 - lbd) * np.exp(mu_2 + sig_2 * x)
+        - y,
+        bracket=[-100, 100],
+    ).root
+
+
+def hermite_polynomial_weights(n_trunc, b, c, n_quad):
+    """
+    Compute weighted sum of normalized Hermite polynomials using Gauss-Hermite
+    quadrature.
+
+    Parameters
+    ----------
+    n_trunc : int
+        Number of Hermite polynomials to sum over.
+    b, c : float
+        Parameters for the weight function g(y) = sqrt(1 + b * exp(c * y)).
+    n_quad : int
+        Number of Gauss-Hermite quadrature points.
+
+    Returns
+    -------
+    float
+        Weighted sum of normalized Hermite polynomials.
+    """
+    x_herm, w_herm = utils.gauss_hermite(n_quad)
+
+    def g(y):
+        return (1 + b * np.exp(c * y)) ** 0.5
+
+    def integrand(n, y):
+        return g(y) * special.eval_hermitenorm(n, y) / special.factorial(n)
+
+    weights = np.array(
+        [np.sum(w_herm * integrand(n, x_herm)) for n in range(n_trunc + 1)]
+    )
+    return weights
