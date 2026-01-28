@@ -1802,6 +1802,35 @@ class RoughBergomi:
         if order == 3:
             return price_0 + price_1 + price_2 + price_3
 
+    def price_vix_hermite_approx(
+        self,
+        T,
+        lbd,
+        eta_2,
+        opt_payoff,
+        K=0.0,
+        order=3,
+        n_quad: int = 50,
+        n_hermite: int = 20,
+    ):
+        """
+        Price a VIX option in the mixed case using Hermite series.
+        """
+        # TODO: finish implementation. Add generic functio to get A = h^{-1}(K^2)
+        # and one computing hermite coefficients.
+        # create rBergomi model with eta=eta_2
+        rb_eta_2 = self.__class__(
+            s0=self.s0, xi0=self.xi0, H=self.H, eta=eta_2, rho=self.rho
+        )
+        fvix2 = self.fut_vix2(T)
+        eta_1 = self.eta
+        meanp_1 = np.log(fvix2) + self.mean_proxy(T)
+        meanp_2 = np.log(fvix2) + rb_eta_2.mean_proxy(T)
+        sigp_1 = self.var_proxy(T) ** 0.5
+        sigp_2 = rb_eta_2.var_proxy(T) ** 0.5
+        w0 = self.price_vix_approx_mixed(T, lbd, eta_2, "fut", order=0)
+        pass
+
     def implied_vol_vix_approx(self, T, k, order=3):
         """
         Approximate the implied volatility of a VIX option at a given log-moneyness
