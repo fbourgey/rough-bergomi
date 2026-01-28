@@ -1649,6 +1649,9 @@ class RoughBergomi:
         if order not in [0, 1, 2, 3]:
             raise ValueError("order must be one of 0, 1, 2, or 3.")
 
+        if opt_payoff not in ["fut", "call", "put"]:
+            raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
+
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
 
@@ -1658,102 +1661,99 @@ class RoughBergomi:
 
         fvix2 = self.fut_vix2(T)
         eta_1 = self.eta
-        meanp_1 = self.mean_proxy_flat(T)
-        meanp_2 = rbergomi_eta_2.mean_proxy_flat(T)
-        sigp_1 = self.var_proxy_flat(T) ** 0.5
-        sigp_2 = rbergomi_eta_2.var_proxy_flat(T) ** 0.5
 
-        # Define the payoff function based on the option type
-        def payoff_fut(x):
-            return np.sqrt(x)
+        # mean and variance of the two proxies
+        meanp_1 = np.log(fvix2) + self.mean_proxy(T)
+        meanp_2 = np.log(fvix2) + rbergomi_eta_2.mean_proxy(T)
+        sigp_1 = self.var_proxy(T) ** 0.5
+        sigp_2 = rbergomi_eta_2.var_proxy(T) ** 0.5
 
-        def payoff_call(x, K=K):
-            return np.maximum(np.sqrt(x) - K, 0.0)
-
-        def payoff_put(x, K=K):
-            return np.maximum(K - np.sqrt(x), 0.0)
-
+        # Payoff function
         if opt_payoff == "fut":
-            payoff = payoff_fut
-        elif opt_payoff == "call":
-            payoff = payoff_call
-        elif opt_payoff == "put":
-            payoff = payoff_put
-        else:
-            raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
 
-        gamma_1_1 = self.gamma_1_proxy(T=T)
-        gamma_2_1 = self.gamma_2_proxy(T=T)
-        gamma_3_1 = self.gamma_3_proxy(T=T)
-        gamma_1_2 = rbergomi_eta_2.gamma_1_proxy(T=T)
-        gamma_2_2 = rbergomi_eta_2.gamma_2_proxy(T=T)
-        gamma_3_2 = rbergomi_eta_2.gamma_3_proxy(T=T)
+            def payoff(x):
+                return np.sqrt(x)
 
-        mu0 = meanp_1 / self.eta**2.0
+        if opt_payoff == "call":
 
+            def payoff(x):
+                return np.maximum(np.sqrt(x) - K, 0.0)
+
+        if opt_payoff == "put":
+
+            def payoff(x):
+                return np.maximum(K - np.sqrt(x), 0.0)
+
+        # gauss-hermite quadrature nodes and weights
         nodes, weights = utils.gauss_hermite(n_quad)
-
         exp_1 = np.exp(meanp_1 + sigp_1 * nodes)
         exp_2 = np.exp(meanp_2 + sigp_2 * nodes)
-        price_0 = np.sum(weights * payoff(fvix2 * (lbd * exp_1 + (1.0 - lbd) * exp_2)))
+        price_0 = np.sum(weights * payoff(lbd * exp_1 + (1.0 - lbd) * exp_2))
 
         # order 0
         if order == 0:
             return price_0
 
-        def payoff_mixed(x, y, lbd, eta_1, eta_2, mu0):
+        # mean proxy minus log E[VIX_T^2] with eta=1
+        mu0 = -(meanp_1 - np.log(fvix2)) / self.eta**2.0
+
+        def payoff_mixed(x, y, lbd, e1, e2):
             term_0 = lbd * np.exp(x + y)
             term_1 = (1 - lbd) * np.exp(
-                eta_2 * (eta_1 - eta_2) * (-mu0) + (eta_2 / eta_1) * x
+                e2 * (e1 - e2) * mu0 + (1 - e2 / e1) * np.log(fvix2) + (e2 / e1) * x
             )
-            return payoff(fvix2 * (term_0 + term_1))
+            return payoff(term_0 + term_1)
 
         def psi(x, idx=1):
             if idx == 1:
 
                 def f_idx(y):
-                    return payoff_mixed(meanp_1 + sigp_1 * x, y, lbd, eta_1, eta_2, mu0)
+                    return payoff_mixed(meanp_1 + sigp_1 * x, y, lbd, eta_1, eta_2)
             else:
 
                 def f_idx(y):
-                    return payoff_mixed(
-                        meanp_2 + sigp_2 * x, y, 1.0 - lbd, eta_2, eta_1, mu0
-                    )
+                    return payoff_mixed(meanp_2 + sigp_2 * x, y, 1 - lbd, eta_2, eta_1)
 
             return (f_idx(eps) - f_idx(-eps)) / (2.0 * eps)
 
-        price_1 = gamma_1_1 * np.sum(
-            weights * np.array([psi(x, idx=1) for x in nodes])
-        ) + gamma_1_2 * np.sum(weights * np.array([psi(x, idx=2) for x in nodes]))
+        # order 1
+        gamma_1_1 = self.gamma_1_proxy(T=T)
+        gamma_1_2 = rbergomi_eta_2.gamma_1_proxy(T=T)
+
+        psi_1_nodes = np.array([psi(x, idx=1) for x in nodes])
+        psi_2_nodes = np.array([psi(x, idx=2) for x in nodes])
+        price_1 = gamma_1_1 * np.sum(weights * psi_1_nodes) + gamma_1_2 * np.sum(
+            weights * psi_2_nodes
+        )
 
         if order == 1:
             return price_0 + price_1
 
+        # order 2
+        gamma_2_1 = self.gamma_2_proxy(T=T)
+        gamma_2_2 = rbergomi_eta_2.gamma_2_proxy(T=T)
+        x_psi_1_nodes = np.array([x * psi(x, idx=1) for x in nodes])
+        x_psi_2_nodes = np.array([x * psi(x, idx=2) for x in nodes])
         price_2 = (
-            gamma_2_1
-            * np.sum(weights * np.array([x * psi(x, idx=1) for x in nodes]))
-            / sigp_1
-            + gamma_2_2
-            * np.sum(weights * np.array([x * psi(x, idx=2) for x in nodes]))
-            / sigp_2
+            gamma_2_1 * np.sum(weights * x_psi_1_nodes) / sigp_1
+            + gamma_2_2 * np.sum(weights * x_psi_2_nodes) / sigp_2
         )
 
         if order == 2:
             return price_0 + price_1 + price_2
 
+        # order 3
+        gamma_3_1 = self.gamma_3_proxy(T=T)
+        gamma_3_2 = rbergomi_eta_2.gamma_3_proxy(T=T)
+        x2_psi_1_nodes = np.array([(x**2 - 1.0) * psi(x, idx=1) for x in nodes])
+        x2_psi_2_nodes = np.array([(x**2 - 1.0) * psi(x, idx=2) for x in nodes])
         price_3 = (
-            gamma_3_1
-            * np.sum(weights * np.array([(x**2 - 1.0) * psi(x, idx=1) for x in nodes]))
-            / sigp_1**2
-            + gamma_3_2
-            * np.sum(weights * np.array([(x**2 - 1.0) * psi(x, idx=2) for x in nodes]))
-            / sigp_2**2
+            gamma_3_1 * np.sum(weights * x2_psi_1_nodes) / sigp_1**2
+            + gamma_3_2 * np.sum(weights * x2_psi_2_nodes) / sigp_2**2
         )
 
         if order == 3:
             return price_0 + price_1 + price_2 + price_3
-
-        raise ValueError("Invalid order specified for VIX option price approximation.")
 
     def price_vix_approx_mixed_order_0(
         self, T, lbd, eta_2, opt_payoff, K=0.0, n_quad: int = 50
@@ -1761,10 +1761,11 @@ class RoughBergomi:
         rbergomi_eta_2 = self.__class__(
             s0=self.s0, xi0=self.xi0, H=self.H, eta=eta_2, rho=self.rho
         )
-        meanp_1 = self.mean_proxy_flat(T)
-        meanp_2 = rbergomi_eta_2.mean_proxy_flat(T)
-        sigp_1 = self.var_proxy_flat(T) ** 0.5
-        sigp_2 = rbergomi_eta_2.var_proxy_flat(T) ** 0.5
+        fvix2 = self.fut_vix2(T)
+        meanp_1 = np.log(fvix2) + self.mean_proxy(T)
+        meanp_2 = np.log(fvix2) + rbergomi_eta_2.mean_proxy(T)
+        sigp_1 = self.var_proxy(T) ** 0.5
+        sigp_2 = rbergomi_eta_2.var_proxy(T) ** 0.5
 
         print("meanp_1:", meanp_1)
         print("meanp_2:", meanp_2)
