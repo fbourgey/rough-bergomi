@@ -1808,7 +1808,7 @@ class RoughBergomi:
         """
         Price a VIX option in the mixed case using Hermite series.
         """
-        # TODO: finish implementation.
+        # TODO: finish implementation and check correctness!
 
         if opt_payoff not in ["call", "put"]:
             raise ValueError("opt_payoff must be either 'call' or 'put'.")
@@ -1832,17 +1832,21 @@ class RoughBergomi:
 
         weights_herm = hermite_polynomial_weights(n_trunc, b, c, n_quad)
 
-        I_N_B = weights_herm[0] * stats.norm.cdf(-B) + np.sum(
-            weights_herm[1:]
-            * special.eval_hermitenorm(np.arange(n_trunc), B)
-            * stats.norm.pdf(B)
-        )
-
         if opt_payoff == "call":
-            return a * I_N_B - K * stats.norm.cdf(-A)
+            I_call_N = weights_herm[0] * stats.norm.cdf(-B) + np.sum(
+                weights_herm[1:]
+                * special.eval_hermitenorm(np.arange(n_trunc), B)
+                * stats.norm.pdf(B)
+            )
+            return a * I_call_N - K * stats.norm.cdf(-A)
 
         if opt_payoff == "put":
-            raise ValueError("Put option not yet implemented in hermite method.")
+            I_put_N = weights_herm[0] * stats.norm.cdf(B) - np.sum(
+                weights_herm[1:]
+                * special.eval_hermitenorm(np.arange(n_trunc), B)
+                * stats.norm.pdf(B)
+            )
+            return K * stats.norm.cdf(A) - a * I_put_N
 
     def implied_vol_vix_approx(self, T, k, order=3):
         """
