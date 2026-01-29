@@ -1622,8 +1622,8 @@ class RoughBergomi:
         eta_2,
         opt_payoff,
         K=0.0,
-        order=3,
-        n_quad: int = 50,
+        order: int = 3,
+        n_quad: int | None = 50,
     ):
         """
         Price a VIX option in the mixed case using the weak approximation.
@@ -1720,28 +1720,44 @@ class RoughBergomi:
                 else:
                     return -lbd * np.exp(x + y) / (2.0 * sqrt_inner)
 
-        # quadrature nodes and weights
-        if opt_payoff == "fut":
-            # Gauss-Hermite quadrature for future payoff
-            nodes, weights = utils.gauss_hermite(n_quad)
+        if n_quad is None:
+            # Use scipy.integrate.quad for numerical integration
+            price_0 = integrate.quad(
+                lambda x: payoff(
+                    lbd * np.exp(meanp_1 + sigp_1 * stats.norm.ppf(x))
+                    + (1.0 - lbd) * np.exp(meanp_2 + sigp_2 * stats.norm.ppf(x))
+                ),
+                0,
+                1,
+            )[0]
         else:
-            # Gauss-Legendre quadrature for call/put payoff
+            # quadrature nodes and weights
+            if opt_payoff == "fut":
+                # Gauss-Hermite quadrature for future payoff
+                nodes, weights = utils.gauss_hermite(n_quad)
+            else:
+                # Gauss-Legendre quadrature for call/put payoff
+                A = inverse_mixture_lognormal(
+                    K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2
+                )
+                B = A - sigp_2 / 2
+                left = stats.norm.cdf(B) if opt_payoff == "call" else 0.0
+                right = 1.0 if opt_payoff == "call" else stats.norm.cdf(B)
+                nodes, weights = utils.gauss_legendre(left, right, n_quad)
+                nodes = stats.norm.ppf(nodes)
 
-            A = inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
-            B = A - sigp_2 / 2
-            left = stats.norm.cdf(B) if opt_payoff == "call" else 0.0
-            right = 1.0 if opt_payoff == "call" else stats.norm.cdf(B)
-            nodes, weights = utils.gauss_legendre(left, right, n_quad)
-            nodes = stats.norm.ppf(nodes)
-
-        exp_1 = np.exp(meanp_1 + sigp_1 * nodes)
-        exp_2 = np.exp(meanp_2 + sigp_2 * nodes)
-        price_0 = np.sum(weights * payoff(lbd * exp_1 + (1.0 - lbd) * exp_2))
-
-        # order 0
+            # order 0
+            price_0 = np.sum(
+                weights
+                * payoff(
+                    lbd * np.exp(meanp_1 + sigp_1 * nodes)
+                    + (1.0 - lbd) * np.exp(meanp_2 + sigp_2 * nodes)
+                )
+            )
         if order == 0:
             return price_0
 
+        # order 1
         def psi(x, idx=1):
             return (
                 dpayoff_mixed_dy(
@@ -1756,15 +1772,23 @@ class RoughBergomi:
                 else sigp_2
             )
 
-        # order 1
         gamma_1_1 = self.gamma_1_proxy(T=T)
         gamma_1_2 = rb_eta_2.gamma_1_proxy(T=T)
 
-        psi_1_nodes = np.array([psi(x, idx=1) for x in nodes])
-        psi_2_nodes = np.array([psi(x, idx=2) for x in nodes])
-        price_1 = gamma_1_1 * np.sum(weights * psi_1_nodes) + gamma_1_2 * np.sum(
-            weights * psi_2_nodes
-        )
+        if n_quad is None:
+            # Use scipy.integrate.quad for numerical integration
+            price_1 = integrate.quad(
+                lambda x: psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)
+                + psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2),
+                0,
+                1,
+            )[0]
+        else:
+            psi_1_nodes = np.array([psi(x, idx=1) for x in nodes])
+            psi_2_nodes = np.array([psi(x, idx=2) for x in nodes])
+            price_1 = gamma_1_1 * np.sum(weights * psi_1_nodes) + gamma_1_2 * np.sum(
+                weights * psi_2_nodes
+            )
 
         if order == 1:
             return price_0 + price_1
@@ -1772,12 +1796,24 @@ class RoughBergomi:
         # order 2
         gamma_2_1 = self.gamma_2_proxy(T=T)
         gamma_2_2 = rb_eta_2.gamma_2_proxy(T=T)
-        x_psi_1_nodes = np.array([x * psi(x, idx=1) for x in nodes])
-        x_psi_2_nodes = np.array([x * psi(x, idx=2) for x in nodes])
-        price_2 = (
-            gamma_2_1 * np.sum(weights * x_psi_1_nodes) / sigp_1
-            + gamma_2_2 * np.sum(weights * x_psi_2_nodes) / sigp_2
-        )
+        if n_quad is None:
+            # Use scipy.integrate.quad for numerical integration
+            price_2 = integrate.quad(
+                lambda x: x
+                * (
+                    psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)
+                    + psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2)
+                ),
+                0,
+                1,
+            )[0]
+        else:
+            x_psi_1_nodes = np.array([x * psi(x, idx=1) for x in nodes])
+            x_psi_2_nodes = np.array([x * psi(x, idx=2) for x in nodes])
+            price_2 = (
+                gamma_2_1 * np.sum(weights * x_psi_1_nodes) / sigp_1
+                + gamma_2_2 * np.sum(weights * x_psi_2_nodes) / sigp_2
+            )
 
         if order == 2:
             return price_0 + price_1 + price_2
@@ -1785,12 +1821,24 @@ class RoughBergomi:
         # order 3
         gamma_3_1 = self.gamma_3_proxy(T=T)
         gamma_3_2 = rb_eta_2.gamma_3_proxy(T=T)
-        x2_psi_1_nodes = np.array([(x**2 - 1.0) * psi(x, idx=1) for x in nodes])
-        x2_psi_2_nodes = np.array([(x**2 - 1.0) * psi(x, idx=2) for x in nodes])
-        price_3 = (
-            gamma_3_1 * np.sum(weights * x2_psi_1_nodes) / sigp_1**2
-            + gamma_3_2 * np.sum(weights * x2_psi_2_nodes) / sigp_2**2
-        )
+        if n_quad is None:
+            # Use scipy.integrate.quad for numerical integration
+            price_3 = integrate.quad(
+                lambda x: (stats.norm.ppf(x) ** 2 - 1.0)
+                * (
+                    psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)
+                    + psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2)
+                ),
+                0,
+                1,
+            )[0]
+        else:
+            x2_psi_1_nodes = np.array([(x**2 - 1.0) * psi(x, idx=1) for x in nodes])
+            x2_psi_2_nodes = np.array([(x**2 - 1.0) * psi(x, idx=2) for x in nodes])
+            price_3 = (
+                gamma_3_1 * np.sum(weights * x2_psi_1_nodes) / sigp_1**2
+                + gamma_3_2 * np.sum(weights * x2_psi_2_nodes) / sigp_2**2
+            )
 
         if order == 3:
             return price_0 + price_1 + price_2 + price_3
@@ -1894,7 +1942,7 @@ class RoughBergomi:
         order=3,
         lbd=0.5,
         eta_2=1.0,
-        n_quad=50,
+        n_quad: int | None = 50,
         return_opt="impvol",
     ):
         """
