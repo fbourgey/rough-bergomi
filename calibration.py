@@ -10,7 +10,6 @@ def fun(
     impvols,
     T,
     ORDER=3,
-    EPS=1e-3,
     N_QUAD=50,
     return_error=True,
     weights=None,
@@ -66,7 +65,6 @@ def fun(
         k=k,
         T=T,
         order=ORDER,
-        eps=EPS,
         n_quad=N_QUAD,
         return_opt="all",
     )
@@ -143,16 +141,7 @@ def optimize_calibration(
 #### full calibration
 
 
-def fun_all(
-    x,
-    days,
-    voldata,
-    ORDER=3,
-    EPS=1e-3,
-    N_QUAD=50,
-    return_error=True,
-    weights=False,
-):
+def fun_all(x, days, voldata, ORDER=3, N_QUAD=50, return_error=True, weights=False):
     """
     Compute residuals across multiple days with parametric forward variance curve.
 
@@ -209,7 +198,6 @@ def fun_all(
             k=voldata[day]["k"],
             T=day / 365.25,
             order=ORDER,
-            eps=EPS,
             n_quad=N_QUAD,
             return_opt="all",
         )

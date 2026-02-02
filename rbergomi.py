@@ -1,11 +1,16 @@
 from collections.abc import Callable
-from dataclasses import dataclass
 
 import numpy as np
 from scipy import integrate, optimize, special, stats
 from tqdm import tqdm
 
 import utils
+from utils_vix import (
+    _deriv_vix_payoff_mixed,
+    _hermite_polynomial_weights,
+    _vix_payoff,
+    inverse_mixture_lognormal,
+)
 
 
 class RoughBergomi:
@@ -1710,7 +1715,7 @@ class RoughBergomi:
                     T=T,
                     lbd=lbd,
                     eta_2=eta_2,
-                    opt_payoff=opt_payoff,
+                    opt_payoff="fut",
                     order=order,
                     n_quad=n_quad,
                     hermite_series=False,
@@ -1733,7 +1738,8 @@ class RoughBergomi:
 
         else:
             # payoff and its derivative for the mixed lognormal
-            payoff, dpayoff_mixed_dy = _payoff_mixed(mu0, fvix2, opt_payoff, K)
+            payoff = _vix_payoff(opt_payoff, K)
+            dpayoff_mixed_dy = _deriv_vix_payoff_mixed(mu0, fvix2, opt_payoff, K)
             if n_quad is None:
                 price_0 = integrate.quad(
                     lambda x: payoff(
@@ -1756,7 +1762,9 @@ class RoughBergomi:
                     B = A - sigp_2 / 2
                     left = stats.norm.cdf(B) if opt_payoff == "call" else 0.0
                     right = 1.0 if opt_payoff == "call" else stats.norm.cdf(B)
-                    nodes, weights = utils.gauss_legendre(left, right, n_quad)
+                    nodes, weights = utils.gauss_legendre(
+                        float(left), float(right), n_quad
+                    )
                     nodes = stats.norm.ppf(nodes)
 
                 # order 0
@@ -2720,172 +2728,115 @@ class RoughBergomi:
                 - gamma_3 * (xp - k) / (vol_proxy**3 * T**2)
             )
 
+    def implied_vol_vix_expansion_mixed(
+        self,
+        K,
+        T,
+        lbd,
+        eta_2,
+        order,
+        opt,
+        n_quad=30,
+        n_trunc_herm=10,
+    ):
+        """
+        Compute VIX implied volatility expansion in the mixed case.
 
-def inverse_mixture_lognormal(y, lbd, mu_1, mu_2, sig_1, sig_2):
-    """
-    Solve for x in the mixture of lognormals equation.
+        Parameters
+        ----------
+        K : float or array_like
+            Strike price.
+        T : float
+            Time to maturity (T > 0).
+        lbd : float
+            Mixing weight in [0, 1].
+        eta_2 : float
+            Second volatility parameter for the mixed model.
+        order : {0, 1, 2}
+            Expansion order.
+        opt : {1, 2, 3}
+            Type of approximation method.
 
-    Finds x such that:
-        lbd * exp(mu_1 + sig_1 * x) + (1 - lbd) * exp(mu_2 + sig_2 * x) = y
+        Returns
+        -------
+        float or ndarray
+            Approximated implied volatility, same shape as `k`.
 
-    Parameters
-    ----------
-    y : float
-        Target value.
-    lbd : float
-        Mixing weight in [0, 1].
-    mu_1, mu_2 : float
-        Location parameters of the two lognormal components.
-    sig_1, sig_2 : float
-        Scale parameters of the two lognormal components.
+        Raises
+        ------
+        ValueError
+            If `order` not in {0,1,2} or if `T <= 0`.
+        """
+        # TODO: finish and check implementation
+        # this is probably wrong as of now
+        if opt not in [1, 2, 3]:
+            raise ValueError("opt 1, 2, or 3 must be specified.")
 
-    Returns
-    -------
-    float
-        Solution x to the mixture equation.
-    """
-    return optimize.root_scalar(
-        lambda x: lbd * np.exp(mu_1 + sig_1 * x)
-        + (1 - lbd) * np.exp(mu_2 + sig_2 * x)
-        - y,
-        bracket=[-100, 100],
-    ).root
+        if order not in [0, 1, 2]:
+            raise ValueError("order must be one of 0, 1, or 2.")
 
+        if order != 0.0:
+            raise NotImplementedError(
+                "Mixed expansion is only implemented for order 0."
+            )
 
-def _hermite_polynomial_weights(n_trunc, b, c, n_quad):
-    """
-    Compute weighted sum of normalized Hermite polynomials using Gauss-Hermite
-    quadrature.
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
 
-    Parameters
-    ----------
-    n_trunc : int
-        Number of Hermite polynomials to sum over.
-    b, c : float
-        Parameters for the weight function g(y) = sqrt(1 + b * exp(c * y)).
-    n_quad : int
-        Number of Gauss-Hermite quadrature points.
-
-    Returns
-    -------
-    float
-        Weighted sum of normalized Hermite polynomials.
-    """
-    x_herm, w_herm = utils.gauss_hermite(n_quad)
-
-    def g(y):
-        return (1 + b * np.exp(c * y)) ** 0.5
-
-    def integrand(n, y):
-        return g(y) * special.eval_hermitenorm(n, y) / special.factorial(n)
-
-    weights = np.array(
-        [np.sum(w_herm * integrand(n, x_herm)) for n in range(n_trunc + 1)]
-    )
-    return weights
-
-
-@dataclass
-class MixedProxyParams:
-    """Parameters for mixed proxy approximation."""
-
-    fvix2: float
-    meanp_1: float
-    meanp_2: float
-    sigp_1: float
-    sigp_2: float
-    eta_1: float
-    eta_2: float
-    mu0: float
-    lbd: float
-    K: float
-
-
-def _create_payoff_functions(params: MixedProxyParams):
-    """Create payoff and derivative functions for mixed approximation."""
-
-    def inner_mixed(x, y, lbd, e1, e2):
-        term1 = lbd * np.exp(x + y)
-        term2 = (1 - lbd) * np.exp(
-            e2 * (e1 - e2) * params.mu0
-            + (1 - e2 / e1) * np.log(params.fvix2)
-            + (e2 / e1) * x
-        )
-        return term1 + term2
-
-    def payoff_fut(x):
-        return np.sqrt(x)
-
-    def payoff_call(x):
-        return np.maximum(np.sqrt(x) - params.K, 0.0)
-
-    def payoff_put(x):
-        return np.maximum(params.K - np.sqrt(x), 0.0)
-
-    def dpayoff_fut(x, y, lbd, e1, e2):
-        inner = inner_mixed(x, y, lbd, e1, e2)
-        return lbd * np.exp(x + y) / (2.0 * np.sqrt(inner))
-
-    def dpayoff_call(x, y, lbd, e1, e2):
-        inner = inner_mixed(x, y, lbd, e1, e2)
-        sqrt_inner = np.sqrt(inner)
-        return (
-            lbd * np.exp(x + y) / (2.0 * sqrt_inner) if sqrt_inner > params.K else 0.0
+        # create rBergomi model with eta=eta_2
+        rb_eta_2 = self.__class__(
+            s0=self.s0, xi0=self.xi0, H=self.H, eta=eta_2, rho=self.rho
         )
 
-    def dpayoff_put(x, y, lbd, e1, e2):
-        inner = inner_mixed(x, y, lbd, e1, e2)
-        sqrt_inner = np.sqrt(inner)
-        return (
-            -lbd * np.exp(x + y) / (2.0 * sqrt_inner) if sqrt_inner < params.K else 0.0
+        fvix2 = self.fut_vix2(T)
+        eta_1 = self.eta
+        meanp_1 = np.log(fvix2) + self.mean_proxy(T)
+        meanp_2 = np.log(fvix2) + rb_eta_2.mean_proxy(T)
+        sigp_1 = self.var_proxy(T) ** 0.5
+        sigp_2 = rb_eta_2.var_proxy(T) ** 0.5
+        A = inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+        B = A - sigp_2 / 2
+
+        a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
+        b = (lbd / (1 - lbd)) * np.exp(
+            meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
         )
+        c = sigp_1 - sigp_2
+        weights_herm = _hermite_polynomial_weights(n_trunc_herm, b, c, n_quad)
 
-    payoffs = {"fut": payoff_fut, "call": payoff_call, "put": payoff_put}
-    dpayoffs = {"fut": dpayoff_fut, "call": dpayoff_call, "put": dpayoff_put}
+        k1 = K
+        x1 = k1 - 0.5 * B * sigp_2 - sigp_2**2 / 8
+        price_fut = self.price_vix_approx_mixed(
+            T=T,
+            lbd=lbd,
+            eta_2=eta_2,
+            opt_payoff="fut",
+            order=order,
+            hermite_series=True,
+            n_trunc_herm=n_trunc_herm,
+        )
+        x2 = np.log(float(price_fut))
+        k2 = x2 + 0.5 * B * sigp_2 + sigp_2**2 / 8
+        x3 = 0.5 * (x1 + x2)
+        k3 = 0.5 * (k1 + k2)
 
-    return payoffs, dpayoffs
+        sig_tilde = sigp_2 / np.sqrt(T)
+        gamma_1_2 = rb_eta_2.gamma_1_proxy(T)
+        gamma_2_2 = rb_eta_2.gamma_2_proxy(T)
+        gamma_3_2 = rb_eta_2.gamma_3_proxy(T)
 
+        c0 = (1 + 0.5 * gamma_1_2 + 0.25 * gamma_2_2 + 0.125 * gamma_3_2) * a
 
-def _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2):
-    """Inner function for mixed proxy payoff calculations."""
-    term1 = lbd * np.exp(x + y)
-    term2 = (1 - lbd) * np.exp(
-        e2 * (e1 - e2) * mu0 + (1 - e2 / e1) * np.log(fvix2) + (e2 / e1) * x
-    )
-    return term1 + term2
+        if order == 0:
+            if opt == 1:
+                x_opt = x1
+            elif opt == 2:
+                x_opt = x2
+            elif opt == 3:
+                x_opt = x3
 
+            impvol = 0.5 * sig_tilde + c0 * np.sum(
+                weights_herm[1:] * special.eval_hermitenorm(np.arange(n_trunc_herm), B)
+            ) / (np.exp(x_opt) * np.sqrt(T))
 
-def _payoff_mixed(mu0, fvix2, opt_payoff, K=0.0):
-    """Create payoff and derivative functions for mixed proxy approximation."""
-    if opt_payoff not in ["fut", "call", "put"]:
-        raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
-
-    # Define payoff function
-    if opt_payoff == "fut":
-        payoff = lambda x: np.sqrt(x)
-    elif opt_payoff == "call":
-        payoff = lambda x: np.maximum(np.sqrt(x) - K, 0.0)
-    else:  # "put"
-        payoff = lambda x: np.maximum(K - np.sqrt(x), 0.0)
-
-    # Define derivative of payoff function
-    if opt_payoff == "fut":
-
-        def dpayoff_mixed_dy(x, y, lbd, e1, e2):
-            inner = _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2)
-            return lbd * np.exp(x + y) / (2.0 * inner**0.5)
-    elif opt_payoff == "call":
-
-        def dpayoff_mixed_dy(x, y, lbd, e1, e2):
-            inner = _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2)
-            sqrt_inner = np.sqrt(inner)
-            return lbd * np.exp(x + y) / (2.0 * sqrt_inner) if sqrt_inner > K else 0.0
-
-    else:
-
-        def dpayoff_mixed_dy(x, y, lbd, e1, e2):
-            inner = _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2)
-            sqrt_inner = np.sqrt(inner)
-            return -lbd * np.exp(x + y) / (2.0 * sqrt_inner) if sqrt_inner < K else 0.0
-
-    return payoff, dpayoff_mixed_dy
+        return impvol

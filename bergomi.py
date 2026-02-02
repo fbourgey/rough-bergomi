@@ -2,6 +2,7 @@ import numpy as np
 from collections.abc import Callable
 
 from utils import gauss_hermite, gauss_legendre
+from utils_vix import _vix_payoff
 
 
 class OneFactorBergomi:
@@ -135,19 +136,3 @@ class OneFactorBergomi:
         )
         payoff = _vix_payoff(opt_payoff, K=K)
         return np.sum(w_herm * payoff(vix2_herm))
-
-
-def _vix_payoff(opt_payoff, K=0.0):
-    """Create payoff and derivative functions for mixed proxy approximation."""
-    if opt_payoff not in ["fut", "call", "put"]:
-        raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
-
-    # Define payoff function
-    if opt_payoff == "fut":
-        payoff = lambda x: np.sqrt(x)
-    elif opt_payoff == "call":
-        payoff = lambda x: np.maximum(np.sqrt(x) - K, 0.0)
-    else:  # "put"
-        payoff = lambda x: np.maximum(K - np.sqrt(x), 0.0)
-
-    return payoff
