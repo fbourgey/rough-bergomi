@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 from scipy import integrate, optimize, special, stats
@@ -1615,6 +1616,21 @@ class RoughBergomi:
 
         raise ValueError("Invalid order specified for VIX futures price approximation.")
 
+    def _validate_mixed_params(self, T, lbd, eta_2, opt_payoff, order, n_quad):
+        """Validate parameters for price_vix_approx_mixed."""
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+        if not 0.0 <= lbd <= 1.0:
+            raise ValueError("lbd must be in the interval [0, 1].")
+        if eta_2 <= 0.0:
+            raise ValueError("eta_2 must be positive.")
+        if opt_payoff not in ["fut", "call", "put"]:
+            raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
+        if order not in [0, 1, 2, 3]:
+            raise ValueError("order must be one of 0, 1, 2, or 3.")
+        if n_quad is not None and n_quad <= 0:
+            raise ValueError("n_quad must be a positive integer or None.")
+
     def price_vix_approx_mixed(
         self,
         T: float,
@@ -1644,7 +1660,13 @@ class RoughBergomi:
         order : int
             Order of the approximation expansion.
         n_quad : int | None = 50
-            Number of quadrature points for numerical integration.
+            Number of quadrature points for numerical integration. If n_quad is None,
+            scipy integrate.quad is used.
+        hermite_series : bool, optional
+            If True, use Hermite series expansion for the inner integral. Default is
+            False.
+        n_trunc_herm : int, optional
+            Number of terms to truncate the Hermite series expansion. Default is 10.
         K : float, optional (default is 0.0)
             Strike of the VIX option.
 
@@ -1653,23 +1675,8 @@ class RoughBergomi:
         float
             Approximated price of the VIX option using the mixed method.
         """
-        if T <= 0:
-            raise ValueError("Maturity T must be positive.")
-
-        if lbd < 0.0 or lbd > 1.0:
-            raise ValueError("lbd must be in the interval [0, 1].")
-
-        if eta_2 <= 0.0:
-            raise ValueError("eta_2 must be positive.")
-
-        if opt_payoff not in ["fut", "call", "put"]:
-            raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
-
-        if order not in [0, 1, 2, 3]:
-            raise ValueError("order must be one of 0, 1, 2, or 3.")
-
-        if n_quad is not None and n_quad <= 0:
-            raise ValueError("n_quad must be a positive integer or None.")
+        # validation
+        self._validate_mixed_params(T, lbd, eta_2, opt_payoff, order, n_quad)
 
         # create rBergomi model with eta=eta_2
         rb_eta_2 = self.__class__(
@@ -1679,60 +1686,24 @@ class RoughBergomi:
         # parameters
         fvix2 = self.fut_vix2(T)
         eta_1 = self.eta
-
-        # mean and variance of the two proxies
         meanp_1 = np.log(fvix2) + self.mean_proxy(T)
         meanp_2 = np.log(fvix2) + rb_eta_2.mean_proxy(T)
         sigp_1 = self.var_proxy(T) ** 0.5
         sigp_2 = rb_eta_2.var_proxy(T) ** 0.5
+        mu0 = (
+            -(meanp_1 - np.log(fvix2)) / self.eta**2.0
+        )  # mean proxy minus log E[VIX_T^2] with eta=1
 
-        # mean proxy minus log E[VIX_T^2] with eta=1
-        mu0 = -(meanp_1 - np.log(fvix2)) / self.eta**2.0
-
-        def inner_mixed(x, y, lbd, e1, e2, meanp_1, fvix2):
-            term1 = lbd * np.exp(x + y)
-            term2 = (1 - lbd) * np.exp(
-                e2 * (e1 - e2) * mu0 + (1 - e2 / e1) * np.log(fvix2) + (e2 / e1) * x
-            )
-            return term1 + term2
-
-        # Payoff function
-        if opt_payoff == "fut":
-
-            def payoff(x):
-                return np.sqrt(x)
-
-            def dpayoff_mixed_dy(x, y, lbd, e1, e2):
-                inner = inner_mixed(x, y, lbd, e1, e2, meanp_1, fvix2)
-                return lbd * np.exp(x + y) / (2.0 * inner**0.5)
-
-        if opt_payoff == "call":
-
-            def payoff(x):
-                return np.maximum(np.sqrt(x) - K, 0.0)
-
-            def dpayoff_mixed_dy(x, y, lbd, e1, e2):
-                inner = inner_mixed(x, y, lbd, e1, e2, meanp_1, fvix2)
-                sqrt_inner = np.sqrt(inner)
-                if sqrt_inner <= K:
-                    return 0.0
-                else:
-                    return lbd * np.exp(x + y) / (2.0 * sqrt_inner)
-
-        if opt_payoff == "put":
-
-            def payoff(x):
-                return np.maximum(K - np.sqrt(x), 0.0)
-
-            def dpayoff_mixed_dy(x, y, lbd, e1, e2):
-                inner = inner_mixed(x, y, lbd, e1, e2, meanp_1, fvix2)
-                sqrt_inner = np.sqrt(inner)
-                if sqrt_inner >= K:
-                    return 0.0
-                else:
-                    return -lbd * np.exp(x + y) / (2.0 * sqrt_inner)
+        if opt_payoff in ["call", "put"]:
+            A = inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+            B = A - sigp_2 / 2
 
         if hermite_series:
+            if order != 0:
+                raise NotImplementedError(
+                    "Hermite series expansion is only implemented for order=0."
+                )
+
             if opt_payoff == "fut":
                 # Gauss-Hermite quadrature
                 price_0 = self.price_vix_approx_mixed(
@@ -1750,30 +1721,20 @@ class RoughBergomi:
                     meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
                 )
                 c = sigp_1 - sigp_2
-                weights_herm = hermite_polynomial_weights(n_trunc_herm, b, c, n_quad)
-                A = inverse_mixture_lognormal(
-                    K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2
+                weights_herm = _hermite_polynomial_weights(n_trunc_herm, b, c, n_quad)
+                sgn = 1.0 if opt_payoff == "call" else -1.0
+
+                I_N = weights_herm[0] * stats.norm.cdf(-sgn * B) + sgn * np.sum(
+                    weights_herm[1:]
+                    * special.eval_hermitenorm(np.arange(n_trunc_herm), B)
+                    * stats.norm.pdf(B)
                 )
-                B = A - sigp_2 / 2
+                price_0 = sgn * a * I_N - sgn * K * stats.norm.cdf(-sgn * A)
 
-                if opt_payoff == "call":
-                    I_call_N = weights_herm[0] * stats.norm.cdf(-B) + np.sum(
-                        weights_herm[1:]
-                        * special.eval_hermitenorm(np.arange(n_trunc_herm), B)
-                        * stats.norm.pdf(B)
-                    )
-                    price_0 = a * I_call_N - K * stats.norm.cdf(-A)
-
-                else:
-                    I_put_N = weights_herm[0] * stats.norm.cdf(B) - np.sum(
-                        weights_herm[1:]
-                        * special.eval_hermitenorm(np.arange(n_trunc_herm), B)
-                        * stats.norm.pdf(B)
-                    )
-                    price_0 = K * stats.norm.cdf(A) - a * I_put_N
         else:
+            # payoff and its derivative for the mixed lognormal
+            payoff, dpayoff_mixed_dy = _payoff_mixed(mu0, fvix2, opt_payoff, K)
             if n_quad is None:
-                # Use scipy.integrate.quad for numerical integration
                 price_0 = integrate.quad(
                     lambda x: payoff(
                         lbd * np.exp(meanp_1 + sigp_1 * stats.norm.ppf(x))
@@ -1811,7 +1772,7 @@ class RoughBergomi:
             return price_0
 
         # order 1
-        def psi(x, idx=1):
+        def _func_psi(x, idx=1):
             return (
                 dpayoff_mixed_dy(
                     x=meanp_1 + sigp_1 * x if idx == 1 else meanp_2 + sigp_2 * x,
@@ -1825,129 +1786,82 @@ class RoughBergomi:
                 else sigp_2
             )
 
-        gamma_1_1 = self.gamma_1_proxy(T=T)
-        gamma_1_2 = rb_eta_2.gamma_1_proxy(T=T)
+        gamma_1 = self.gamma_1_proxy(T=T), rb_eta_2.gamma_1_proxy(T=T)
 
         if n_quad is None:
-            # Use scipy.integrate.quad for numerical integration
-            price_1 = integrate.quad(
-                lambda x: psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)
-                + psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2),
-                0,
-                1,
-            )[0]
+            psi = [
+                integrate.quad(
+                    lambda x, idx=idx: _func_psi(
+                        meanp_1 + sigp_1 * stats.norm.ppf(x), idx=idx
+                    ),
+                    0,
+                    1,
+                )[0]
+                for idx in [1, 2]
+            ]
         else:
-            psi_1_nodes = np.array([psi(x, idx=1) for x in nodes])
-            psi_2_nodes = np.array([psi(x, idx=2) for x in nodes])
-            price_1 = gamma_1_1 * np.sum(weights * psi_1_nodes) + gamma_1_2 * np.sum(
-                weights * psi_2_nodes
-            )
+            psi = [
+                np.sum(weights * np.array([_func_psi(x, idx=idx) for x in nodes]))
+                for idx in [1, 2]
+            ]
 
+        price_1 = np.sum(gamma_1 * np.asarray(psi))
         if order == 1:
             return price_0 + price_1
 
         # order 2
-        gamma_2_1 = self.gamma_2_proxy(T=T)
-        gamma_2_2 = rb_eta_2.gamma_2_proxy(T=T)
+        gamma_2 = self.gamma_2_proxy(T=T), rb_eta_2.gamma_2_proxy(T=T)
         if n_quad is None:
-            # Use scipy.integrate.quad for numerical integration
-            price_2 = integrate.quad(
-                lambda x: x
-                * (
-                    psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)
-                    + psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2)
-                ),
+            x_psi_1 = integrate.quad(
+                lambda x: x * (_func_psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)),
+                0,
+                1,
+            )[0]
+            x_psi_2 = integrate.quad(
+                lambda x: x * (_func_psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2)),
                 0,
                 1,
             )[0]
         else:
-            x_psi_1_nodes = np.array([x * psi(x, idx=1) for x in nodes])
-            x_psi_2_nodes = np.array([x * psi(x, idx=2) for x in nodes])
-            price_2 = (
-                gamma_2_1 * np.sum(weights * x_psi_1_nodes) / sigp_1
-                + gamma_2_2 * np.sum(weights * x_psi_2_nodes) / sigp_2
-            )
+            x_psi_1_nodes = np.array([x * _func_psi(x, idx=1) for x in nodes])
+            x_psi_2_nodes = np.array([x * _func_psi(x, idx=2) for x in nodes])
+            x_psi_1 = np.sum(weights * x_psi_1_nodes) / sigp_1
+            x_psi_2 = np.sum(weights * x_psi_2_nodes) / sigp_2
+
+        price_2 = gamma_2[0] * x_psi_1 + gamma_2[1] * x_psi_2
 
         if order == 2:
             return price_0 + price_1 + price_2
 
         # order 3
-        gamma_3_1 = self.gamma_3_proxy(T=T)
-        gamma_3_2 = rb_eta_2.gamma_3_proxy(T=T)
+        gamma_3 = self.gamma_3_proxy(T=T), rb_eta_2.gamma_3_proxy(T=T)
         if n_quad is None:
-            # Use scipy.integrate.quad for numerical integration
-            price_3 = integrate.quad(
+            x2_psi_1 = integrate.quad(
                 lambda x: (stats.norm.ppf(x) ** 2 - 1.0)
-                * (
-                    psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)
-                    + psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2)
-                ),
+                * (_func_psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)),
+                0,
+                1,
+            )[0]
+            x2_psi_2 = integrate.quad(
+                lambda x: (stats.norm.ppf(x) ** 2 - 1.0)
+                * (_func_psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2)),
                 0,
                 1,
             )[0]
         else:
-            x2_psi_1_nodes = np.array([(x**2 - 1.0) * psi(x, idx=1) for x in nodes])
-            x2_psi_2_nodes = np.array([(x**2 - 1.0) * psi(x, idx=2) for x in nodes])
-            price_3 = (
-                gamma_3_1 * np.sum(weights * x2_psi_1_nodes) / sigp_1**2
-                + gamma_3_2 * np.sum(weights * x2_psi_2_nodes) / sigp_2**2
+            x2_psi_1_nodes = np.array(
+                [(x**2 - 1.0) * _func_psi(x, idx=1) for x in nodes]
             )
+            x2_psi_2_nodes = np.array(
+                [(x**2 - 1.0) * _func_psi(x, idx=2) for x in nodes]
+            )
+            x2_psi_1 = np.sum(weights * x2_psi_1_nodes) / sigp_1**2
+            x2_psi_2 = np.sum(weights * x2_psi_2_nodes) / sigp_2**2
+
+        price_3 = gamma_3[0] * x2_psi_1 + gamma_3[1] * x2_psi_2
 
         if order == 3:
             return price_0 + price_1 + price_2 + price_3
-
-    def price_vix_hermite_approx(
-        self,
-        T,
-        lbd,
-        eta_2,
-        K=0.0,
-        n_quad: int = 50,
-        n_trunc: int = 20,
-        opt_payoff="call",
-    ):
-        """
-        Price a VIX option in the mixed case using Hermite series.
-        """
-        # TODO: finish implementation and check correctness!
-
-        if opt_payoff not in ["call", "put"]:
-            raise ValueError("opt_payoff must be either 'call' or 'put'.")
-
-        rb_eta_2 = self.__class__(
-            s0=self.s0, xi0=self.xi0, H=self.H, eta=eta_2, rho=self.rho
-        )
-        fvix2 = self.fut_vix2(T)
-        meanp_1 = np.log(fvix2) + self.mean_proxy(T)
-        meanp_2 = np.log(fvix2) + rb_eta_2.mean_proxy(T)
-        sigp_1 = self.var_proxy(T) ** 0.5
-        sigp_2 = rb_eta_2.var_proxy(T) ** 0.5
-
-        a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
-        b = (lbd / (1 - lbd)) * np.exp(
-            meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
-        )
-        c = sigp_1 - sigp_2
-        A = inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
-        B = A - sigp_2 / 2
-
-        weights_herm = hermite_polynomial_weights(n_trunc, b, c, n_quad)
-
-        if opt_payoff == "call":
-            I_call_N = weights_herm[0] * stats.norm.cdf(-B) + np.sum(
-                weights_herm[1:]
-                * special.eval_hermitenorm(np.arange(n_trunc), B)
-                * stats.norm.pdf(B)
-            )
-            return a * I_call_N - K * stats.norm.cdf(-A)
-
-        if opt_payoff == "put":
-            I_put_N = weights_herm[0] * stats.norm.cdf(B) - np.sum(
-                weights_herm[1:]
-                * special.eval_hermitenorm(np.arange(n_trunc), B)
-                * stats.norm.pdf(B)
-            )
-            return K * stats.norm.cdf(A) - a * I_put_N
 
     def implied_vol_vix_approx(self, T, k, order=3):
         """
@@ -2838,7 +2752,7 @@ def inverse_mixture_lognormal(y, lbd, mu_1, mu_2, sig_1, sig_2):
     ).root
 
 
-def hermite_polynomial_weights(n_trunc, b, c, n_quad):
+def _hermite_polynomial_weights(n_trunc, b, c, n_quad):
     """
     Compute weighted sum of normalized Hermite polynomials using Gauss-Hermite
     quadrature.
@@ -2869,3 +2783,109 @@ def hermite_polynomial_weights(n_trunc, b, c, n_quad):
         [np.sum(w_herm * integrand(n, x_herm)) for n in range(n_trunc + 1)]
     )
     return weights
+
+
+@dataclass
+class MixedProxyParams:
+    """Parameters for mixed proxy approximation."""
+
+    fvix2: float
+    meanp_1: float
+    meanp_2: float
+    sigp_1: float
+    sigp_2: float
+    eta_1: float
+    eta_2: float
+    mu0: float
+    lbd: float
+    K: float
+
+
+def _create_payoff_functions(params: MixedProxyParams):
+    """Create payoff and derivative functions for mixed approximation."""
+
+    def inner_mixed(x, y, lbd, e1, e2):
+        term1 = lbd * np.exp(x + y)
+        term2 = (1 - lbd) * np.exp(
+            e2 * (e1 - e2) * params.mu0
+            + (1 - e2 / e1) * np.log(params.fvix2)
+            + (e2 / e1) * x
+        )
+        return term1 + term2
+
+    def payoff_fut(x):
+        return np.sqrt(x)
+
+    def payoff_call(x):
+        return np.maximum(np.sqrt(x) - params.K, 0.0)
+
+    def payoff_put(x):
+        return np.maximum(params.K - np.sqrt(x), 0.0)
+
+    def dpayoff_fut(x, y, lbd, e1, e2):
+        inner = inner_mixed(x, y, lbd, e1, e2)
+        return lbd * np.exp(x + y) / (2.0 * np.sqrt(inner))
+
+    def dpayoff_call(x, y, lbd, e1, e2):
+        inner = inner_mixed(x, y, lbd, e1, e2)
+        sqrt_inner = np.sqrt(inner)
+        return (
+            lbd * np.exp(x + y) / (2.0 * sqrt_inner) if sqrt_inner > params.K else 0.0
+        )
+
+    def dpayoff_put(x, y, lbd, e1, e2):
+        inner = inner_mixed(x, y, lbd, e1, e2)
+        sqrt_inner = np.sqrt(inner)
+        return (
+            -lbd * np.exp(x + y) / (2.0 * sqrt_inner) if sqrt_inner < params.K else 0.0
+        )
+
+    payoffs = {"fut": payoff_fut, "call": payoff_call, "put": payoff_put}
+    dpayoffs = {"fut": dpayoff_fut, "call": dpayoff_call, "put": dpayoff_put}
+
+    return payoffs, dpayoffs
+
+
+def _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2):
+    """Inner function for mixed proxy payoff calculations."""
+    term1 = lbd * np.exp(x + y)
+    term2 = (1 - lbd) * np.exp(
+        e2 * (e1 - e2) * mu0 + (1 - e2 / e1) * np.log(fvix2) + (e2 / e1) * x
+    )
+    return term1 + term2
+
+
+def _payoff_mixed(mu0, fvix2, opt_payoff, K=0.0):
+    """Create payoff and derivative functions for mixed proxy approximation."""
+    if opt_payoff not in ["fut", "call", "put"]:
+        raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
+
+    # Define payoff function
+    if opt_payoff == "fut":
+        payoff = lambda x: np.sqrt(x)
+    elif opt_payoff == "call":
+        payoff = lambda x: np.maximum(np.sqrt(x) - K, 0.0)
+    else:  # "put"
+        payoff = lambda x: np.maximum(K - np.sqrt(x), 0.0)
+
+    # Define derivative of payoff function
+    if opt_payoff == "fut":
+
+        def dpayoff_mixed_dy(x, y, lbd, e1, e2):
+            inner = _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2)
+            return lbd * np.exp(x + y) / (2.0 * inner**0.5)
+    elif opt_payoff == "call":
+
+        def dpayoff_mixed_dy(x, y, lbd, e1, e2):
+            inner = _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2)
+            sqrt_inner = np.sqrt(inner)
+            return lbd * np.exp(x + y) / (2.0 * sqrt_inner) if sqrt_inner > K else 0.0
+
+    else:
+
+        def dpayoff_mixed_dy(x, y, lbd, e1, e2):
+            inner = _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2)
+            sqrt_inner = np.sqrt(inner)
+            return -lbd * np.exp(x + y) / (2.0 * sqrt_inner) if sqrt_inner < K else 0.0
+
+    return payoff, dpayoff_mixed_dy
