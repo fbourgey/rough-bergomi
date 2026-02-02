@@ -1617,13 +1617,15 @@ class RoughBergomi:
 
     def price_vix_approx_mixed(
         self,
-        T,
-        lbd,
-        eta_2,
-        opt_payoff,
-        K=0.0,
-        order: int = 3,
+        T: float,
+        lbd: float,
+        eta_2: float,
+        opt_payoff: str,
+        order: int,
         n_quad: int | None = 50,
+        K: float = 0.0,
+        hermite_series: bool = False,
+        n_trunc_herm: int = 10,
     ):
         """
         Price a VIX option in the mixed case using the weak approximation.
@@ -1639,32 +1641,42 @@ class RoughBergomi:
         opt_payoff : str
             Payoff function of the option, e.g., "call" for a call option. Use "put"
             for a put option, or "fut" for a future payoff.
+        order : int
+            Order of the approximation expansion.
+        n_quad : int | None = 50
+            Number of quadrature points for numerical integration.
         K : float, optional (default is 0.0)
             Strike of the VIX option.
-        order : int, optional
-            Order of the approximation expansion (default is 3).
-        n_quad : int, optional
-            Number of quadrature points for numerical integration (default is 50).
 
         Returns
         -------
         float
             Approximated price of the VIX option using the mixed method.
         """
-        if order not in [0, 1, 2, 3]:
-            raise ValueError("order must be one of 0, 1, 2, or 3.")
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+
+        if lbd < 0.0 or lbd > 1.0:
+            raise ValueError("lbd must be in the interval [0, 1].")
+
+        if eta_2 <= 0.0:
+            raise ValueError("eta_2 must be positive.")
 
         if opt_payoff not in ["fut", "call", "put"]:
             raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
 
-        if T <= 0:
-            raise ValueError("Maturity T must be positive.")
+        if order not in [0, 1, 2, 3]:
+            raise ValueError("order must be one of 0, 1, 2, or 3.")
+
+        if n_quad is not None and n_quad <= 0:
+            raise ValueError("n_quad must be a positive integer or None.")
 
         # create rBergomi model with eta=eta_2
         rb_eta_2 = self.__class__(
             s0=self.s0, xi0=self.xi0, H=self.H, eta=eta_2, rho=self.rho
         )
 
+        # parameters
         fvix2 = self.fut_vix2(T)
         eta_1 = self.eta
 
@@ -1720,40 +1732,81 @@ class RoughBergomi:
                 else:
                     return -lbd * np.exp(x + y) / (2.0 * sqrt_inner)
 
-        if n_quad is None:
-            # Use scipy.integrate.quad for numerical integration
-            price_0 = integrate.quad(
-                lambda x: payoff(
-                    lbd * np.exp(meanp_1 + sigp_1 * stats.norm.ppf(x))
-                    + (1.0 - lbd) * np.exp(meanp_2 + sigp_2 * stats.norm.ppf(x))
-                ),
-                0,
-                1,
-            )[0]
-        else:
-            # quadrature nodes and weights
+        if hermite_series:
             if opt_payoff == "fut":
-                # Gauss-Hermite quadrature for future payoff
-                nodes, weights = utils.gauss_hermite(n_quad)
+                # Gauss-Hermite quadrature
+                price_0 = self.price_vix_approx_mixed(
+                    T=T,
+                    lbd=lbd,
+                    eta_2=eta_2,
+                    opt_payoff=opt_payoff,
+                    order=order,
+                    n_quad=n_quad,
+                    hermite_series=False,
+                )
             else:
-                # Gauss-Legendre quadrature for call/put payoff
+                a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
+                b = (lbd / (1 - lbd)) * np.exp(
+                    meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
+                )
+                c = sigp_1 - sigp_2
+                weights_herm = hermite_polynomial_weights(n_trunc_herm, b, c, n_quad)
                 A = inverse_mixture_lognormal(
                     K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2
                 )
                 B = A - sigp_2 / 2
-                left = stats.norm.cdf(B) if opt_payoff == "call" else 0.0
-                right = 1.0 if opt_payoff == "call" else stats.norm.cdf(B)
-                nodes, weights = utils.gauss_legendre(left, right, n_quad)
-                nodes = stats.norm.ppf(nodes)
 
-            # order 0
-            price_0 = np.sum(
-                weights
-                * payoff(
-                    lbd * np.exp(meanp_1 + sigp_1 * nodes)
-                    + (1.0 - lbd) * np.exp(meanp_2 + sigp_2 * nodes)
+                if opt_payoff == "call":
+                    I_call_N = weights_herm[0] * stats.norm.cdf(-B) + np.sum(
+                        weights_herm[1:]
+                        * special.eval_hermitenorm(np.arange(n_trunc_herm), B)
+                        * stats.norm.pdf(B)
+                    )
+                    price_0 = a * I_call_N - K * stats.norm.cdf(-A)
+
+                else:
+                    I_put_N = weights_herm[0] * stats.norm.cdf(B) - np.sum(
+                        weights_herm[1:]
+                        * special.eval_hermitenorm(np.arange(n_trunc_herm), B)
+                        * stats.norm.pdf(B)
+                    )
+                    price_0 = K * stats.norm.cdf(A) - a * I_put_N
+        else:
+            if n_quad is None:
+                # Use scipy.integrate.quad for numerical integration
+                price_0 = integrate.quad(
+                    lambda x: payoff(
+                        lbd * np.exp(meanp_1 + sigp_1 * stats.norm.ppf(x))
+                        + (1.0 - lbd) * np.exp(meanp_2 + sigp_2 * stats.norm.ppf(x))
+                    ),
+                    0,
+                    1,
+                )[0]
+            else:
+                # quadrature nodes and weights
+                if opt_payoff == "fut":
+                    # Gauss-Hermite quadrature for future payoff
+                    nodes, weights = utils.gauss_hermite(n_quad)
+                else:
+                    # Gauss-Legendre quadrature for call/put payoff
+                    A = inverse_mixture_lognormal(
+                        K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2
+                    )
+                    B = A - sigp_2 / 2
+                    left = stats.norm.cdf(B) if opt_payoff == "call" else 0.0
+                    right = 1.0 if opt_payoff == "call" else stats.norm.cdf(B)
+                    nodes, weights = utils.gauss_legendre(left, right, n_quad)
+                    nodes = stats.norm.ppf(nodes)
+
+                # order 0
+                price_0 = np.sum(
+                    weights
+                    * payoff(
+                        lbd * np.exp(meanp_1 + sigp_1 * nodes)
+                        + (1.0 - lbd) * np.exp(meanp_2 + sigp_2 * nodes)
+                    )
                 )
-            )
+
         if order == 0:
             return price_0
 
@@ -1937,13 +1990,15 @@ class RoughBergomi:
 
     def implied_vol_vix_approx_mixed(
         self,
-        T,
-        k,
-        order=3,
-        lbd=0.5,
-        eta_2=1.0,
+        T: float,
+        k: float | np.ndarray,
+        order: int,
+        lbd: float,
+        eta_2: float,
         n_quad: int | None = 50,
         return_opt="impvol",
+        hermite_series: bool = False,
+        n_trunc_herm: int = 10,
     ):
         """
         Compute the implied volatility of a VIX option using a mixed
@@ -1953,17 +2008,16 @@ class RoughBergomi:
         ----------
         T : float
             Maturity of the VIX option.
-        k : float
+        k : float | np.ndarray
             Log-moneyness of the VIX option.
-        order : int, optional
-            Order of the approximation expansion (default is 3).
-        lbd : float, optional
-            Mixing parameter between the two regimes (default is 0.5).
-        eta_2 : float, optional
+        order : int
+            Order of the approximation expansion.
+        lbd : float
+            Mixing parameter between the two regimes.
+        eta_2 : float
             Volatility of volatility parameter for the second exponential
-            (default is 1.0).
-        n_quad : int, optional
-            Number of quadrature points for numerical integration (default is 50).
+        n_quad : int | None
+            Number of quadrature points for numerical integration.
         return_opt : str, optional
             If 'impvol', return only the implied volatility.
             If 'all', return both the futures price and the implied volatility.
@@ -1977,13 +2031,33 @@ class RoughBergomi:
         """
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
+
+        if lbd < 0 or lbd > 1:
+            raise ValueError("lbd must be in the interval [0, 1].")
+
+        if eta_2 < 0:
+            raise ValueError("eta_2 must be non-negative.")
+
+        if n_quad is not None and n_quad <= 0:
+            raise ValueError("n_quad must be a positive integer or None.")
+
+        if order not in [0, 1, 2, 3]:
+            raise ValueError("order must be one of 0, 1, 2, or 3.")
+
         if return_opt not in ["impvol", "all"]:
             raise ValueError("return_opt must be either 'impvol' or 'all'.")
 
-        k = np.atleast_1d(np.asarray(k))
         F = self.price_vix_approx_mixed(
-            T=T, K=0.0, lbd=lbd, eta_2=eta_2, order=order, opt_payoff="fut"
+            T=T,
+            lbd=lbd,
+            eta_2=eta_2,
+            opt_payoff="fut",
+            order=order,
+            n_quad=n_quad,
+            hermite_series=hermite_series,
+            n_trunc_herm=n_trunc_herm,
         )
+        k = np.atleast_1d(np.asarray(k))
         K = F * np.exp(k)
         opttype = 2 * (K >= F) - 1
         otm_price = np.array(
@@ -1996,6 +2070,8 @@ class RoughBergomi:
                     opt_payoff="call" if opttype_i == 1 else "put",
                     order=order,
                     n_quad=n_quad,
+                    hermite_series=hermite_series,
+                    n_trunc_herm=n_trunc_herm,
                 )
                 for K_i, opttype_i in zip(K, opttype, strict=True)
             ]
