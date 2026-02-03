@@ -3,19 +3,20 @@ from scipy import optimize, special
 from utils import gauss_hermite
 
 
-def _inner_mixed_func(x, y, lbd, mu_2, eta_1, eta_2, fvix2):
+def _inner_mixed_func(x, lbd, mu_2, eta_1, eta_2, fvix2):
     """Inner function for mixed proxy payoff calculations."""
-    frac = (1 + eta_1 * eta_2) * np.log(fvix2) / (2 * eta_1)
-    term_x = (eta_1 - eta_2) * (frac - mu_2 / (2 * eta_2)) + (eta_2 / eta_1) * x
-    return lbd * np.exp(x + y) + (1 - lbd) * np.exp(term_x)
+    log_fvix2 = np.log(fvix2)
+    term_x = 0.5 * eta_2 * (eta_1 - eta_2) * (mu_2 - log_fvix2) + (eta_2 / eta_1) * x
+    return fvix2 * (lbd * np.exp(x) + (1 - lbd) * np.exp(term_x))
 
 
-def _inverse_x_inner_mixed_func(z, mu_2, y, lbd, eta_1, eta_2, fvix2):
+def _inverse_x_inner_mixed_func(z, mu_2, lbd, eta_1, eta_2, fvix2):
     """Inverse of the inner function for mixed proxy payoff calculations."""
-    return optimize.root_scalar(
-        lambda x: _inner_mixed_func(x, y, lbd, mu_2, eta_1, eta_2, fvix2) - z,
-        bracket=[-100, 100],
-    ).root
+
+    def func(x):
+        return _inner_mixed_func(x, lbd, mu_2, eta_1, eta_2, fvix2) - z
+
+    return optimize.root_scalar(func, bracket=[-100, 100]).root
 
 
 def _vix_payoff(opt_payoff, K=0.0):
@@ -39,9 +40,9 @@ def _deriv_vix_payoff_mixed(opt_payoff, K=0.0):
     if opt_payoff not in ["fut", "call", "put"]:
         raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
 
-    def dpayoff_mixed_dy(x, y, lbd, mu_2, eta_1, eta_2, fvix2):
-        sqrt_inner = _inner_mixed_func(x, y, lbd, mu_2, eta_1, eta_2, fvix2) ** 0.5
-        base_derivative = lbd * np.exp(x + y) / (2.0 * sqrt_inner)
+    def dpayoff_mixed_dy(x, lbd, mu_2, eta_1, eta_2, fvix2):
+        sqrt_inner = _inner_mixed_func(x, lbd, mu_2, eta_1, eta_2, fvix2) ** 0.5
+        base_derivative = fvix2 * lbd * np.exp(x) / (2.0 * sqrt_inner)
 
         if opt_payoff == "fut":
             return base_derivative
@@ -53,7 +54,7 @@ def _deriv_vix_payoff_mixed(opt_payoff, K=0.0):
     return dpayoff_mixed_dy
 
 
-def inverse_mixture_lognormal(y, lbd, mu_1, mu_2, sig_1, sig_2):
+def _inverse_mixture_lognormal(y, lbd, mu_1, mu_2, sig_1, sig_2):
     """
     Solve for x in the mixture of lognormals equation.
 
@@ -77,9 +78,9 @@ def inverse_mixture_lognormal(y, lbd, mu_1, mu_2, sig_1, sig_2):
         Solution x to the mixture equation.
     """
     return optimize.root_scalar(
-        lambda x: lbd * np.exp(mu_1 + sig_1 * x)
-        + (1 - lbd) * np.exp(mu_2 + sig_2 * x)
-        - y,
+        lambda x: (
+            lbd * np.exp(mu_1 + sig_1 * x) + (1 - lbd) * np.exp(mu_2 + sig_2 * x) - y
+        ),
         bracket=[-100, 100],
     ).root
 

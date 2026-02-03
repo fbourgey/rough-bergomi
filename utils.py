@@ -254,7 +254,9 @@ def black_impvol_brentq(K, T, F, value, opttype=1):
         return np.nan
 
 
-def black_impvol(K, T, F, value, opttype=1, TOL=1e-6, MAX_ITER=1000):
+def black_impvol(
+    K, T, F, value, opttype: int | np.ndarray = 1, TOL=1e-6, MAX_ITER=1000
+):
     """
     Calculate the Black implied volatility using a bisection method.
 

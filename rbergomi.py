@@ -10,7 +10,7 @@ from utils_vix import (
     _hermite_polynomial_weights,
     _inverse_x_inner_mixed_func,
     _vix_payoff,
-    inverse_mixture_lognormal,
+    _inverse_mixture_lognormal,
 )
 
 
@@ -916,8 +916,8 @@ class RoughBergomi:
         rule="trap",
         seed=None,
         control_variate: bool = False,
-        lbd=None,
-        eta_2=None,
+        lbd: float | None = None,
+        eta_2: float | None = None,
         return_xi: bool = False,
     ):
         """
@@ -968,6 +968,7 @@ class RoughBergomi:
         is_mixed = lbd is not None and eta_2 is not None
         if is_mixed:
             exp_1 = np.exp(self.eta * y - 0.5 * self.eta**2 * var_y[:, None])
+            eta_2 = float(eta_2)
             exp_2 = np.exp(eta_2 * y - 0.5 * eta_2**2 * var_y[:, None])
             xi = self.xi0(tab_u[:, None]) * (lbd * exp_1 + (1.0 - lbd) * exp_2)
         else:
@@ -1041,7 +1042,7 @@ class RoughBergomi:
         vix = self.simulate_vix(
             T=T, n_mc=n_mc, n_disc=n_disc, rule=rule, seed=seed, lbd=lbd, eta_2=eta_2
         )
-        return utils.black_otm_impvol_mc(S=vix, k=k, T=T)
+        return np.asarray(utils.black_otm_impvol_mc(S=vix, k=k, T=T))
 
     def price_vix(
         self,
@@ -1771,7 +1772,7 @@ class RoughBergomi:
                 T=T, lbd=lbd, eta_2=eta_2, opt_payoff="fut", order=order, n_quad=n_quad
             )
         else:
-            A = inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+            A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
             B = A - sigp_2 / 2
             a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
             b = (lbd / (1 - lbd)) * np.exp(
@@ -2708,12 +2709,11 @@ class RoughBergomi:
         )
 
         fvix2 = self.fut_vix2(T)
-        eta_1 = self.eta
         meanp_1 = np.log(fvix2) + self.mean_proxy(T)
         meanp_2 = np.log(fvix2) + rb_eta_2.mean_proxy(T)
         sigp_1 = self.var_proxy(T) ** 0.5
         sigp_2 = rb_eta_2.var_proxy(T) ** 0.5
-        A = inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+        A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
         B = A - sigp_2 / 2
 
         a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
@@ -2731,13 +2731,12 @@ class RoughBergomi:
             eta_2=eta_2,
             opt_payoff="fut",
             order=order,
-            hermite_series=True,
             n_trunc_herm=n_trunc_herm,
         )
         x2 = np.log(float(price_fut))
-        k2 = x2 + 0.5 * B * sigp_2 + sigp_2**2 / 8
+        # k2 = x2 + 0.5 * B * sigp_2 + sigp_2**2 / 8
         x3 = 0.5 * (x1 + x2)
-        k3 = 0.5 * (k1 + k2)
+        # k3 = 0.5 * (k1 + k2)
 
         sig_tilde = sigp_2 / np.sqrt(T)
         gamma_1_2 = rb_eta_2.gamma_1_proxy(T)
@@ -2779,7 +2778,7 @@ def _compute_price_0_mixed(n_quad, K, opt_payoff, params):
             1,
         )[0]
     else:
-        nodes, weights = _get_nodes_weights(n_quad, K, opt_payoff, params)
+        nodes, weights = _get_nodes_weights(n_quad, K, opt_payoff, params, order=0)
         # order 0
         price_0 = np.sum(
             weights
@@ -2793,9 +2792,13 @@ def _compute_price_0_mixed(n_quad, K, opt_payoff, params):
 
 
 def _compute_price_mixed(n_quad, K, opt_payoff, params, order):
+    if order not in [0, 1, 2, 3]:
+        raise ValueError("order must be one of 0, 1, 2, or 3.")
+
     if order == 0:
         return _compute_price_0_mixed(n_quad, K, opt_payoff, params)
 
+    # Unpack parameters
     lbd = params["lbd"]
     meanp_1 = params["meanp_1"]
     meanp_2 = params["meanp_2"]
@@ -2804,14 +2807,22 @@ def _compute_price_mixed(n_quad, K, opt_payoff, params, order):
     eta_1 = params["eta_1"]
     eta_2 = params["eta_2"]
     fvix2 = params["fvix2"]
+    log_fvix2 = np.log(fvix2)
+
+    # Get gamma values for this order
+    gamma_key = f"gamma_{order}"
+    gammas = params[gamma_key]
+
+    # Get derivative of payoff function
     dpayoff_mixed_dy = _deriv_vix_payoff_mixed(opt_payoff, K)
 
     def _func_psi(x, idx=1):
+        """Compute psi function for given index (1 or 2)."""
         sig_idx = sigp_1 if idx == 1 else sigp_2
+        mean_idx = meanp_1 - log_fvix2 if idx == 1 else meanp_2 - log_fvix2
         return (
             dpayoff_mixed_dy(
-                x=meanp_1 + sigp_1 * x if idx == 1 else meanp_2 + sigp_2 * x,
-                y=0.0,
+                x=mean_idx + sig_idx * x,
                 lbd=lbd if idx == 1 else 1 - lbd,
                 eta_1=eta_1 if idx == 1 else eta_2,
                 eta_2=eta_2 if idx == 1 else eta_1,
@@ -2821,46 +2832,139 @@ def _compute_price_mixed(n_quad, K, opt_payoff, params, order):
             * sig_idx
         )
 
-    if order == 1:
-        gammas = params["gamma_1"]
-    else:
-        gammas = params["gamma_2"] if order == 2 else params["gamma_3"]
+    def _get_order_weight(x, order):
+        """Get the order-dependent weight function."""
+        if order == 1:
+            return 1.0
+        elif order == 2:
+            return x
+        else:  # order == 3
+            return x**2 - 1
 
     psi_1 = lambda x: _func_psi(x, idx=1)
     psi_2 = lambda x: _func_psi(x, idx=2)
-
-    if order == 1:
-        integrand = lambda x: gammas[0] * psi_1(x) + gammas[1] * psi_2(x)
-    if order == 2:
-        integrand = lambda x: x * (gammas[0] * psi_1(x) + gammas[1] * psi_2(x))
-    if order == 3:
-        integrand = lambda x: (x**2 - 1) * (gammas[0] * psi_1(x) + gammas[1] * psi_2(x))
+    order_weight = lambda x: _get_order_weight(x, order)
 
     if n_quad is None:
-        price = integrate.quad(lambda x: integrand(stats.norm.ppf(x)), 0, 1)[0]
+        # Use scipy.quad for continuous integration
+        def integrand_1(u):
+            x = stats.norm.ppf(u)
+            return order_weight(x) * gammas[0] * psi_1(x)
+
+        def integrand_2(u):
+            x = stats.norm.ppf(u)
+            return order_weight(x) * gammas[1] * psi_2(x)
+
+        left_1, right_1 = _get_nodes_weights(
+            n_quad, K, opt_payoff, params, order, idx=1
+        )
+        left_2, right_2 = _get_nodes_weights(
+            n_quad, K, opt_payoff, params, order, idx=2
+        )
+
+        price_1 = integrate.quad(integrand_1, left_1, right_1)[0]
+        price_2 = integrate.quad(integrand_2, left_2, right_2)[0]
     else:
-        nodes, weights = _get_nodes_weights(n_quad, K, opt_payoff, params)
-        price = np.sum(weights * integrand(nodes))
+        # Use Gauss quadrature for discrete approximation
+        nodes_1, weights_1 = _get_nodes_weights(
+            n_quad, K, opt_payoff, params, order, idx=1
+        )
+        nodes_2, weights_2 = _get_nodes_weights(
+            n_quad, K, opt_payoff, params, order, idx=2
+        )
 
-    return price
+        # Compute integrands with order-dependent weights
+        weight_fn = order_weight(nodes_1)
+        integrand_1 = weight_fn * psi_1(nodes_1)
+
+        weight_fn = order_weight(nodes_2)
+        integrand_2 = weight_fn * psi_2(nodes_2)
+
+        price_1 = gammas[0] * np.sum(weights_1 * integrand_1)
+        price_2 = gammas[1] * np.sum(weights_2 * integrand_2)
+
+    return price_1 + price_2
 
 
-def _get_nodes_weights(n_quad, K, opt_payoff, params):
+def _get_nodes_weights(n_quad, K, opt_payoff, params, order, idx=1):
+    """
+    Get quadrature nodes and weights for mixed VIX pricing.
+
+    Parameters
+    ----------
+    n_quad : int
+        Quadrature points.
+    K : float
+        Strike price.
+    opt_payoff : str
+        Option payoff type.
+    params : dict
+        Model parameters.
+    order : int
+        Approximation order.
+    idx : int, optional
+        Index for psi function, by default 1
+
+    Returns
+    -------
+    tuple
+        Quadrature nodes, weights, left, right.
+    """
     lbd = params["lbd"]
     meanp_1 = params["meanp_1"]
     meanp_2 = params["meanp_2"]
     sigp_1 = params["sigp_1"]
     sigp_2 = params["sigp_2"]
+    eta_1 = params["eta_1"]
+    eta_2 = params["eta_2"]
+    fvix2 = params["fvix2"]
+    log_fvix2 = np.log(fvix2)
+
+    if opt_payoff == "fut" and n_quad is None:
+        left = 0.0
+        right = 1.0
+
+    if opt_payoff in ["call", "put"]:
+        # TODO: check why order >= 1 is not working
+
+        # A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+        # endpoint = A - sigp_2 / 2
+        # print("endpoint:", endpoint)
+
+        # endpoint1 = _inverse_x_inner_mixed_func(
+        #     z=K**2,
+        #     mu_2=meanp_2 if idx == 1 else meanp_1,
+        #     lbd=lbd if idx == 1 else 1 - lbd,
+        #     eta_1=eta_1 if idx == 1 else eta_2,
+        #     eta_2=eta_2 if idx == 1 else eta_1,
+        #     fvix2=fvix2,
+        # )
+        # print("endpoint1:", endpoint1)
+
+        if order == 0:
+            A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+            endpoint = A - sigp_2 / 2
+        else:
+            endpoint = _inverse_x_inner_mixed_func(
+                z=K**2,
+                mu_2=meanp_2 if idx == 1 else meanp_1,
+                lbd=lbd if idx == 1 else 1 - lbd,
+                eta_1=eta_1 if idx == 1 else eta_2,
+                eta_2=eta_2 if idx == 1 else eta_1,
+                fvix2=fvix2,
+            )
+
+        left = stats.norm.cdf(endpoint) if opt_payoff == "call" else 0.0
+        right = 1.0 if opt_payoff == "call" else stats.norm.cdf(endpoint)
+
+    if n_quad is None:
+        return left, right
 
     if opt_payoff == "fut":
         # Gauss-Hermite quadrature for future payoff
         nodes, weights = utils.gauss_hermite(n_quad)
     else:
         # Gauss-Legendre quadrature for call/put payoff
-        A = inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
-        B = A - sigp_2 / 2
-        left = stats.norm.cdf(B) if opt_payoff == "call" else 0.0
-        right = 1.0 if opt_payoff == "call" else stats.norm.cdf(B)
         nodes, weights = utils.gauss_legendre(float(left), float(right), n_quad)
         nodes = stats.norm.ppf(nodes)
 
