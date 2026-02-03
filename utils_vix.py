@@ -5,11 +5,8 @@ from utils import gauss_hermite
 
 def _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2):
     """Inner function for mixed proxy payoff calculations."""
-    term1 = lbd * np.exp(x + y)
-    term2 = (1 - lbd) * np.exp(
-        e2 * (e1 - e2) * mu0 + (1 - e2 / e1) * np.log(fvix2) + (e2 / e1) * x
-    )
-    return term1 + term2
+    term_x = e2 * (e1 - e2) * mu0 + (1 - e2 / e1) * np.log(fvix2) + (e2 / e1) * x
+    return lbd * np.exp(x + y) + (1 - lbd) * np.exp(term_x)
 
 
 def _vix_payoff(opt_payoff, K=0.0):
@@ -30,24 +27,19 @@ def _vix_payoff(opt_payoff, K=0.0):
 
 def _deriv_vix_payoff_mixed(mu0, fvix2, opt_payoff, K=0.0):
     """Create derivative of vix payoff functions for mixed proxy."""
-    if opt_payoff == "fut":
+    if opt_payoff not in ["fut", "call", "put"]:
+        raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
 
-        def dpayoff_mixed_dy(x, y, lbd, e1, e2):
-            inner = _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2)
-            return lbd * np.exp(x + y) / (2.0 * inner**0.5)
-    elif opt_payoff == "call":
+    def dpayoff_mixed_dy(x, y, lbd, e1, e2):
+        sqrt_inner = _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2)**0.5
+        base_derivative = lbd * np.exp(x + y) / (2.0 * sqrt_inner)
 
-        def dpayoff_mixed_dy(x, y, lbd, e1, e2):
-            inner = _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2)
-            sqrt_inner = np.sqrt(inner)
-            return lbd * np.exp(x + y) / (2.0 * sqrt_inner) if sqrt_inner > K else 0.0
-
-    else:
-
-        def dpayoff_mixed_dy(x, y, lbd, e1, e2):
-            inner = _inner_mixed_func(mu0, x, y, lbd, e1, e2, fvix2)
-            sqrt_inner = np.sqrt(inner)
-            return -lbd * np.exp(x + y) / (2.0 * sqrt_inner) if sqrt_inner < K else 0.0
+        if opt_payoff == "fut":
+            return base_derivative
+        elif opt_payoff == "call":
+            return base_derivative if sqrt_inner > K else 0.0
+        else:  # "put"
+            return -base_derivative if sqrt_inner < K else 0.0
 
     return dpayoff_mixed_dy
 

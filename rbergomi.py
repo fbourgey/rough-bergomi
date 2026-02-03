@@ -1797,46 +1797,40 @@ class RoughBergomi:
         gamma_1 = self.gamma_1_proxy(T=T), rb_eta_2.gamma_1_proxy(T=T)
 
         if n_quad is None:
-            psi = [
-                integrate.quad(
-                    lambda x, idx=idx: _func_psi(
-                        meanp_1 + sigp_1 * stats.norm.ppf(x), idx=idx
-                    ),
-                    0,
-                    1,
-                )[0]
-                for idx in [1, 2]
-            ]
+
+            def func1(x):
+                return gamma_1[0] * _func_psi(
+                    meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1
+                ) + gamma_1[1] * _func_psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2)
+
+            price_1 = integrate.quad(func1, 0, 1)[0]
         else:
             psi = [
                 np.sum(weights * np.array([_func_psi(x, idx=idx) for x in nodes]))
                 for idx in [1, 2]
             ]
-
-        price_1 = np.sum(gamma_1 * np.asarray(psi))
+            price_1 = np.sum(gamma_1 * np.asarray(psi))
         if order == 1:
             return price_0 + price_1
 
         # order 2
         gamma_2 = self.gamma_2_proxy(T=T), rb_eta_2.gamma_2_proxy(T=T)
         if n_quad is None:
-            x_psi_1 = integrate.quad(
-                lambda x: x * (_func_psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)),
-                0,
-                1,
-            )[0]
-            x_psi_2 = integrate.quad(
-                lambda x: x * (_func_psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2)),
-                0,
-                1,
-            )[0]
+
+            def func2(x):
+                return stats.norm.ppf(x) * (
+                    gamma_2[0] * _func_psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)
+                    + gamma_2[1]
+                    * _func_psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2)
+                )
+
+            price_2 = integrate.quad(func2, 0, 1)[0]
         else:
             x_psi_1_nodes = np.array([x * _func_psi(x, idx=1) for x in nodes])
             x_psi_2_nodes = np.array([x * _func_psi(x, idx=2) for x in nodes])
             x_psi_1 = np.sum(weights * x_psi_1_nodes) / sigp_1
             x_psi_2 = np.sum(weights * x_psi_2_nodes) / sigp_2
-
-        price_2 = gamma_2[0] * x_psi_1 + gamma_2[1] * x_psi_2
+            price_2 = gamma_2[0] * x_psi_1 + gamma_2[1] * x_psi_2
 
         if order == 2:
             return price_0 + price_1 + price_2
@@ -1844,18 +1838,15 @@ class RoughBergomi:
         # order 3
         gamma_3 = self.gamma_3_proxy(T=T), rb_eta_2.gamma_3_proxy(T=T)
         if n_quad is None:
-            x2_psi_1 = integrate.quad(
-                lambda x: (stats.norm.ppf(x) ** 2 - 1.0)
-                * (_func_psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)),
-                0,
-                1,
-            )[0]
-            x2_psi_2 = integrate.quad(
-                lambda x: (stats.norm.ppf(x) ** 2 - 1.0)
-                * (_func_psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2)),
-                0,
-                1,
-            )[0]
+
+            def func3(x):
+                return (stats.norm.ppf(x) ** 2 - 1.0) * (
+                    gamma_3[0] * _func_psi(meanp_1 + sigp_1 * stats.norm.ppf(x), idx=1)
+                    + gamma_3[1]
+                    * _func_psi(meanp_2 + sigp_2 * stats.norm.ppf(x), idx=2)
+                )
+
+            price_3 = integrate.quad(func3, 0, 1)[0]
         else:
             x2_psi_1_nodes = np.array(
                 [(x**2 - 1.0) * _func_psi(x, idx=1) for x in nodes]
@@ -1865,8 +1856,7 @@ class RoughBergomi:
             )
             x2_psi_1 = np.sum(weights * x2_psi_1_nodes) / sigp_1**2
             x2_psi_2 = np.sum(weights * x2_psi_2_nodes) / sigp_2**2
-
-        price_3 = gamma_3[0] * x2_psi_1 + gamma_3[1] * x2_psi_2
+            price_3 = gamma_3[0] * x2_psi_1 + gamma_3[1] * x2_psi_2
 
         if order == 3:
             return price_0 + price_1 + price_2 + price_3
