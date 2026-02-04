@@ -6,7 +6,7 @@ from utils import gauss_hermite
 def _inner_mixed_func(x, lbd, mu_2, eta_1, eta_2, fvix2):
     """Inner function for mixed proxy payoff calculations."""
     log_fvix2 = np.log(fvix2)
-    term_x = 0.5 * eta_2 * (eta_1 - eta_2) * (mu_2 - log_fvix2) + (eta_2 / eta_1) * x
+    term_x = (eta_1 - eta_2) * (mu_2 - log_fvix2) / eta_2 + (eta_2 / eta_1) * x
     return fvix2 * (lbd * np.exp(x) + (1 - lbd) * np.exp(term_x))
 
 
