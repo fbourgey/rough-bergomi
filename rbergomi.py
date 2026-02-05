@@ -1486,7 +1486,9 @@ class RoughBergomi:
     ####################################################################################
     # Weak approximation methods for VIX pricing
     ####################################################################################
-    def price_vix_approx(self, k, T, opttype=1, order=3, return_fut=False) -> float:
+    def price_vix_approx(
+        self, k, T, opttype=1, order=3, return_fut=False, meanp=None, tot_varp=None
+    ) -> float:
         """
         Approximate the price of a VIX option using a proxy expansion.
 
@@ -1503,6 +1505,12 @@ class RoughBergomi:
         return_fut : bool, optional
             If True, return the proxy for the VIX future instead of the option price.
             Default is False.
+        meanp : float, optional
+            Mean parameter for the proxy expansion. If None, it will be computed
+            internally.
+        tot_varp : float, optional
+            Total variance parameter for the proxy expansion. If None, it will be
+            computed internally.
 
         Returns
         -------
@@ -1530,8 +1538,11 @@ class RoughBergomi:
         if order == 3:
             gamma_3 = self.gamma_3_proxy(T=T)
 
-        meanp = self.mean_proxy(T) + np.log(self.fut_vix2(T))
-        tot_varp = self.var_proxy(T)
+        if meanp is None:
+            meanp = self.mean_proxy(T) + np.log(self.fut_vix2(T))
+        if tot_varp is None:
+            tot_varp = self.var_proxy(T)
+
         volp = np.sqrt(tot_varp / T)
         S = np.exp(0.5 * meanp + 0.125 * tot_varp)
 
@@ -1570,7 +1581,7 @@ class RoughBergomi:
 
         raise ValueError("Invalid order specified for VIX option price approximation.")
 
-    def price_vix_fut_approx(self, T, order=3) -> float:
+    def price_vix_fut_approx(self, T, order=3, meanp=None, tot_varp=None) -> float:
         """
         Approximate the price of a VIX futures contract at maturity T using a proxy
         expansion.
@@ -1597,9 +1608,10 @@ class RoughBergomi:
 
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
-
-        meanp = self.mean_proxy(T) + np.log(self.fut_vix2(T))
-        tot_varp = self.var_proxy(T)
+        if meanp is None:
+            meanp = self.mean_proxy(T) + np.log(self.fut_vix2(T))
+        if tot_varp is None:
+            tot_varp = self.var_proxy(T)
         S = np.exp(meanp / 2.0 + tot_varp / 8.0)
         # order 0
         price_0 = S
@@ -1791,7 +1803,7 @@ class RoughBergomi:
 
         return price_0
 
-    def implied_vol_vix_approx(self, T, k, order=3):
+    def implied_vol_vix_approx(self, T, k, order=3, meanp=None, tot_varp=None):
         """
         Approximate the implied volatility of a VIX option at a given log-moneyness
         using the proxy expansion.
@@ -1804,6 +1816,11 @@ class RoughBergomi:
             Log-moneyness (typically 0 for ATM). Can be a scalar or array.
         order : int, optional
             Order of the expansion (0, 1, 2, or 3). Default is 3.
+        mean_p : float or None, optional
+            Precomputed mean proxy value. If None, it will be computed internally.
+        tot_varp : float or None, optional
+            Precomputed total variance proxy value. If None, it will be computed
+            internally.
 
         Returns
         -------
@@ -1819,12 +1836,19 @@ class RoughBergomi:
             raise ValueError("Maturity T must be positive.")
 
         k = np.atleast_1d(np.asarray(k))
-        F = self.price_vix_fut_approx(T=T, order=order)
+        F = self.price_vix_fut_approx(T=T, order=order, meanp=meanp, tot_varp=tot_varp)
         K = F * np.exp(k)
         opttype = 2 * (K >= F) - 1
         otm_price = np.array(
             [
-                self.price_vix_approx(T=T, k=k_i, opttype=opttype_i, order=order)
+                self.price_vix_approx(
+                    T=T,
+                    k=k_i,
+                    opttype=opttype_i,
+                    order=order,
+                    meanp=meanp,
+                    tot_varp=tot_varp,
+                )
                 for k_i, opttype_i in zip(k, opttype, strict=True)
             ]
         )
@@ -1925,6 +1949,36 @@ class RoughBergomi:
             return F, impvol_approx
         else:
             return impvol_approx
+
+    def implied_vol_vix_lognorm_approx_mixed(
+        self, T: float, k: float | np.ndarray, order: int, lbd: float, eta_2: float
+    ):
+        """
+        Compute the implied volatility of a VIX option approximating the sum of two
+        lognormal distributions with a single lognormal distribution in the mixed case.
+        """
+        params = self._get_params_mixed(T, lbd, eta_2, order)
+        lbd = params["lbd"]
+        meanp_1 = params["meanp_1"]
+        meanp_2 = params["meanp_2"]
+        sigp_1 = params["sigp_1"]
+        sigp_2 = params["sigp_2"]
+        params_lognorm = utils.sum_lognorm_single_lognorm_approx(
+            lbd=lbd,
+            mu_1=meanp_1,
+            mu_2=meanp_2,
+            sig_1=sigp_1,
+            sig_2=sigp_2,
+        )
+        meanp = params_lognorm["mu_y"]
+        tot_varp = params_lognorm["sig_y"] ** 2
+        return self.implied_vol_vix_approx(
+            T=T,
+            k=k,
+            order=order,
+            meanp=meanp,
+            tot_varp=tot_varp,
+        )
 
     def mean_proxy(self, T, n_quad=30, quad_scipy=True):
         r"""

@@ -628,3 +628,39 @@ def xi0_heston(
         return v0_flat + (v0_backwardation - v0_flat) * np.exp(-lbd_xi0 * t)
     else:
         raise ValueError("Unknown shape")
+
+
+def sum_lognorm_single_lognorm_approx(lbd, mu_1, mu_2, sig_1, sig_2):
+    """
+    Approximate
+    X = lbd * exp(mu_1 + sig_1 * Z) + (1 - lbd) * exp(mu_2 + sig_2 * Z), Z = N(0, 1)
+    by a lognormal Y = exp(mu_y + sig_y * Z) by matching the first two moments of X and
+    Y.
+    """
+
+    # First moment of X
+    m1_x = lbd * np.exp(mu_1 + 0.5 * sig_1**2) + (1 - lbd) * np.exp(
+        mu_2 + 0.5 * sig_2**2
+    )
+    # Second moment of X
+    m2_x = (
+        lbd**2 * np.exp(2 * mu_1 + 2 * sig_1**2)
+        + (1 - lbd) ** 2 * np.exp(2 * mu_2 + 2 * sig_2**2)
+        + 2 * lbd * (1 - lbd) * np.exp(mu_1 + mu_2 + 0.5 * (sig_1**2 + sig_2**2))
+    )
+
+    # Parameters of the approximating lognormal
+    sig_y = np.log(m2_x / m1_x**2) ** 0.5
+    mu_y = np.log(m1_x) - 0.5 * sig_y**2
+
+    # Moments of Y for verification
+    m1_y = np.exp(mu_y + 0.5 * sig_y**2)
+    m2_y = np.exp(2 * mu_y + 2 * sig_y**2)
+
+    assert np.isclose(m1_x, m1_y), "First moments do not match!"
+    assert np.isclose(m2_x, m2_y), "Second moments do not match!"
+
+    return {
+        "mu_y": mu_y,
+        "sig_y": sig_y,
+    }
