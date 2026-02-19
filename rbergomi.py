@@ -695,12 +695,14 @@ class RoughBergomi:
         atm_lv_skew = np.zeros(n_split)
 
         for i in range(n_split):
-            atm_impvol[i], atm_impvol_skew[i] = self.implied_vol_from_paths(
-                T=tab_t_split[i],
-                int_v_dt=int_v_dt_split[i, :],
-                int_sqrt_v_dw=int_sqrt_v_dw_split[i, :],
-                conditioning=True,
-                return_skew=True,
+            atm_impvol[i], atm_impvol_skew[i] = np.asarray(
+                self.implied_vol_from_paths(
+                    T=tab_t_split[i],
+                    int_v_dt=int_v_dt_split[i, :],
+                    int_sqrt_v_dw=int_sqrt_v_dw_split[i, :],
+                    conditioning=True,
+                    return_skew=True,
+                )
             )
             atm_lv[i], atm_lv_skew[i] = self.local_vol_from_paths(
                 k=0.0,
@@ -1546,18 +1548,18 @@ class RoughBergomi:
         volp = np.sqrt(tot_varp / T)
         S = np.exp(0.5 * meanp + 0.125 * tot_varp)
 
-            if order >= 0:
-                F = S
-            if order >= 1:
-                F += gamma_1 * 0.5 * S
-            if order >= 2:
-                F += gamma_2 * 0.25 * S
-            if order == 3:
-                F += gamma_3 * 0.125 * S
-            if return_fut:
-                return F
+        if order >= 0:
+            F = S
+        if order >= 1:
+            F += gamma_1 * 0.5 * S
+        if order >= 2:
+            F += gamma_2 * 0.25 * S
+        if order == 3:
+            F += gamma_3 * 0.125 * S
+        if return_fut:
+            return F
 
-            K = F * np.exp(k)
+        K = F * np.exp(k)
         # order 0
         price_0 = utils.black_price(K=K, T=T, F=S, vol=0.5 * volp, opttype=opttype)
         if order == 0:
@@ -1989,54 +1991,25 @@ class RoughBergomi:
         mixed case.
         """
         params = self._get_params_mixed(T, lbd, eta_2, order)
-        lbd = params["lbd"]
-        meanp_1 = params["meanp_1"]
-        meanp_2 = params["meanp_2"]
-        sigp_1 = params["sigp_1"]
-        sigp_2 = params["sigp_2"]
         # shifted lognormal parameters
-        params_sl = utils.sum_lognorm_shifted_lognorm_approx(
-            lbd=lbd,
-            mu_1=meanp_1,
-            mu_2=meanp_2,
-            sig_1=sigp_1,
-            sig_2=sigp_2,
+        params_sl = utils.sqrt_sum_lognorm_shifted_lognorm_approx(
+            lbd=params["lbd"],
+            mu_1=params["meanp_1"],
+            mu_2=params["meanp_2"],
+            sig_1=params["sigp_1"],
+            sig_2=params["sigp_2"],
         )
-        meanp = params_sl["mu_y"]
-        tot_varp = params_sl["sig_y"] ** 2
-        c = params_sl["c_y"]
+        meanp = 2 * params_sl["mu_y"]
+        tot_varp = (2 * params_sl["sig_y"]) ** 2
+        c_y = params_sl["c_y"]
 
-        raise NotImplementedError()
-
-        # For now, this is wrong as we need to compute the update the new futures price
-        # with the shifted parameter.
-        # raise ValueError("TODO")
-
-        # k = np.atleast_1d(np.asarray(k))
-        # F = self.price_vix_approx(
-        #     T=T,
-        #     k=k_i,
-        #     opttype=opttype_i,
-        #     order=order,
-        #     meanp=meanp,
-        #     tot_varp=tot_varp,
-        # )
-        # K = F * np.exp(k)
-        # opttype = 2 * (K >= F) - 1
-        # otm_price = np.array(
-        #     [
-        #         self.price_vix_approx(
-        #             T=T,
-        #             k=k_i,
-        #             opttype=opttype_i,
-        #             order=order,
-        #             meanp=meanp,
-        #             tot_varp=tot_varp,
-        #         )
-        #         for k_i, opttype_i in zip(k, opttype, strict=True)
-        #     ]
-        # )
-        # return utils.black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
+        return self.implied_vol_vix_approx(
+            T=T,
+            k=np.log(np.exp(k) - c_y),
+            order=order,
+            meanp=meanp,
+            tot_varp=tot_varp,
+        )
 
     def mean_proxy(self, T, n_quad=30, quad_scipy=True):
         r"""
@@ -2992,8 +2965,8 @@ def _compute_price_mixed(n_quad, K, opt_payoff, params, order):
         weight_fn = order_weight(nodes_2)
         integrand_2 = weight_fn * psi_2(nodes_2)
 
-        price_1 = gammas[0] * np.sum(weights_1 * integrand_1)
-        price_2 = gammas[1] * np.sum(weights_2 * integrand_2)
+        price_1 = gammas[0] * np.sum(weights_1 * np.asarray(integrand_1))
+        price_2 = gammas[1] * np.sum(weights_2 * np.asarray(integrand_2))
 
     return price_1 + price_2
 
@@ -3030,7 +3003,7 @@ def _get_nodes_weights(n_quad, K, opt_payoff, params, order, idx=1):
     eta_1 = params["eta_1"]
     eta_2 = params["eta_2"]
     fvix2 = params["fvix2"]
-    log_fvix2 = np.log(fvix2)
+    # log_fvix2 = np.log(fvix2)
 
     if opt_payoff == "fut" and n_quad is None:
         left = 0.0
