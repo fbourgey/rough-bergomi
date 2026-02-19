@@ -664,3 +664,126 @@ def sum_lognorm_single_lognorm_approx(lbd, mu_1, mu_2, sig_1, sig_2):
         "mu_y": mu_y,
         "sig_y": sig_y,
     }
+
+
+def sum_lognorm_shifted_lognorm_approx(lbd, mu_1, mu_2, sig_1, sig_2):
+    """
+    X = lbd * exp(mu_1 + sig_1 * Z) + (1 - lbd) * exp(mu_2 + sig_2 * Z)
+    Approximate X by Y = c_y + exp(mu_y + sig_y * Z)
+    Returns c_y, mu_y, sig_y.
+    """
+
+    # ---------- moments of X ----------
+    E1 = np.exp(mu_1 + 0.5 * sig_1**2)
+    E2 = np.exp(mu_2 + 0.5 * sig_2**2)
+
+    E1_2 = np.exp(2 * mu_1 + 2 * sig_1**2)
+    E2_2 = np.exp(2 * mu_2 + 2 * sig_2**2)
+    E12 = np.exp(mu_1 + mu_2 + 0.5 * (sig_1 + sig_2) ** 2)
+
+    E1_3 = np.exp(3 * mu_1 + 4.5 * sig_1**2)
+    E2_3 = np.exp(3 * mu_2 + 4.5 * sig_2**2)
+    E1_2E2 = np.exp(2 * mu_1 + mu_2 + 0.5 * (2 * sig_1 + sig_2) ** 2)
+    E1E2_2 = np.exp(mu_1 + 2 * mu_2 + 0.5 * (sig_1 + 2 * sig_2) ** 2)
+
+    m1_x = lbd * E1 + (1 - lbd) * E2
+
+    m2_x = lbd**2 * E1_2 + (1 - lbd) ** 2 * E2_2 + 2 * lbd * (1 - lbd) * E12
+
+    m3_x = (
+        lbd**3 * E1_3
+        + (1 - lbd) ** 3 * E2_3
+        + 3 * lbd**2 * (1 - lbd) * E1_2E2
+        + 3 * lbd * (1 - lbd) ** 2 * E1E2_2
+    )
+
+    # ---------- infer shifted lognormal parameters ----------
+    var_x = m2_x - m1_x**2
+    kappa3_x = m3_x - 3 * m1_x * m2_x + 2 * m1_x**3
+    skew_x = kappa3_x / var_x**1.5
+
+    # solve u^3 + 3u = skew_x
+    disc = np.sqrt(skew_x**2 / 4 + 1)
+    u = np.cbrt(skew_x / 2 + disc) + np.cbrt(skew_x / 2 - disc)
+
+    t = u**2 + 1
+    sig_y = np.sqrt(np.log(t))
+    mu_y = 0.5 * np.log(var_x / (t * (t - 1)))
+
+    c_y = m1_x - np.exp(mu_y) * np.sqrt(t)
+
+    # ---------- moments of Y ----------
+    EW = np.exp(mu_y) * np.sqrt(t)
+    EW2 = np.exp(2 * mu_y) * t**2
+    EW3 = np.exp(3 * mu_y) * t ** (9 / 2)
+
+    m1_y = c_y + EW
+    m2_y = c_y**2 + 2 * c_y * EW + EW2
+    m3_y = c_y**3 + 3 * c_y**2 * EW + 3 * c_y * EW2 + EW3
+
+    assert np.isclose(m1_x, m1_y), "First moments do not match!"
+    assert np.isclose(m2_x, m2_y), "Second moments do not match!"
+    assert np.isclose(m3_x, m3_y), "Third moments do not match!"
+
+    return {
+        "c_y": c_y,
+        "mu_y": mu_y,
+        "sig_y": sig_y,
+    }
+
+
+def sqrt_sum_lognorm_shifted_lognorm_approx(lbd, mu_1, mu_2, sig_1, sig_2, n_quad=30):
+    """
+    V^2 = lbd * exp(mu_1 + sig_1 * Z) + (1 - lbd) * exp(mu_2 + sig_2 * Z)
+    with Z = N(0,1).
+    Approximate V by Y = c_y + exp(mu_y + sig_y * Z)
+    Returns c_y, mu_y, sig_y.
+    """
+
+    x_herm, w_herm = gauss_hermite(n_quad)
+
+    def moment_v(p):
+        """Compute p-momenth of V."""
+        integrand = (
+            lbd * np.exp(mu_1 + sig_1 * x_herm)
+            + (1 - lbd) * np.exp(mu_2 + sig_2 * x_herm)
+        ) ** (p / 2)
+        return np.sum(w_herm * integrand)
+
+    # compute first three moments of V
+    m1_v, m2_v, m3_v = (moment_v(p) for p in [1, 2, 3])
+
+    def func_a(d):
+        return m1_v - d
+
+    def func_b(d):
+        return m2_v - 2 * d * m1_v + d**2
+
+    def func_c(d):
+        return m3_v - 3 * d * m2_v + 3 * d**2 * m1_v - d**3
+
+    c_y = optimize.root_scalar(
+        lambda x: func_c(x) * func_a(x) ** 3 - func_b(x) ** 3, bracket=[-10, 10]
+    ).root
+    a_y = func_a(c_y)
+    b_y = func_b(c_y)
+    sig_y = np.log(b_y / a_y**2) ** 0.5
+    mu_y = np.log(a_y) - 0.5 * sig_y**2
+
+    def moment_y(p):
+        """Compute p-momenth of Y."""
+        return np.sum(w_herm * (np.exp(mu_y + sig_y * x_herm) + c_y) ** p)
+
+    # check that the first three moments of V and Y match
+
+    # compute first three moments of Y
+    m1_y, m2_y, m3_y = (moment_v(p) for p in [1, 2, 3])
+    print(f"m1_v: {m1_v}, m1_y: {m1_y}")
+    print(f"m2_v: {m2_v}, m2_y: {m2_y}")
+    print(f"m3_v: {m3_v}, m3_y: {m3_y}")
+
+    return {
+        "c_y": c_y,
+        "mu_y": mu_y,
+        "sig_y": sig_y,
+    }

@@ -1546,18 +1546,18 @@ class RoughBergomi:
         volp = np.sqrt(tot_varp / T)
         S = np.exp(0.5 * meanp + 0.125 * tot_varp)
 
-        if order >= 0:
-            F = S
-        if order >= 1:
-            F += gamma_1 * 0.5 * S
-        if order >= 2:
-            F += gamma_2 * 0.25 * S
-        if order == 3:
-            F += gamma_3 * 0.125 * S
-        if return_fut:
-            return F
+            if order >= 0:
+                F = S
+            if order >= 1:
+                F += gamma_1 * 0.5 * S
+            if order >= 2:
+                F += gamma_2 * 0.25 * S
+            if order == 3:
+                F += gamma_3 * 0.125 * S
+            if return_fut:
+                return F
 
-        K = F * np.exp(k)
+            K = F * np.exp(k)
         # order 0
         price_0 = utils.black_price(K=K, T=T, F=S, vol=0.5 * volp, opttype=opttype)
         if order == 0:
@@ -1979,6 +1979,64 @@ class RoughBergomi:
             meanp=meanp,
             tot_varp=tot_varp,
         )
+
+    def implied_vol_vix_shifted_lognorm_approx_mixed(
+        self, T: float, k: float | np.ndarray, order: int, lbd: float, eta_2: float
+    ):
+        """
+        Compute the implied volatility of a VIX option approximating the sum of two
+        lognormal distributions with a single shifted lognormal distribution in the
+        mixed case.
+        """
+        params = self._get_params_mixed(T, lbd, eta_2, order)
+        lbd = params["lbd"]
+        meanp_1 = params["meanp_1"]
+        meanp_2 = params["meanp_2"]
+        sigp_1 = params["sigp_1"]
+        sigp_2 = params["sigp_2"]
+        # shifted lognormal parameters
+        params_sl = utils.sum_lognorm_shifted_lognorm_approx(
+            lbd=lbd,
+            mu_1=meanp_1,
+            mu_2=meanp_2,
+            sig_1=sigp_1,
+            sig_2=sigp_2,
+        )
+        meanp = params_sl["mu_y"]
+        tot_varp = params_sl["sig_y"] ** 2
+        c = params_sl["c_y"]
+
+        raise NotImplementedError()
+
+        # For now, this is wrong as we need to compute the update the new futures price
+        # with the shifted parameter.
+        # raise ValueError("TODO")
+
+        # k = np.atleast_1d(np.asarray(k))
+        # F = self.price_vix_approx(
+        #     T=T,
+        #     k=k_i,
+        #     opttype=opttype_i,
+        #     order=order,
+        #     meanp=meanp,
+        #     tot_varp=tot_varp,
+        # )
+        # K = F * np.exp(k)
+        # opttype = 2 * (K >= F) - 1
+        # otm_price = np.array(
+        #     [
+        #         self.price_vix_approx(
+        #             T=T,
+        #             k=k_i,
+        #             opttype=opttype_i,
+        #             order=order,
+        #             meanp=meanp,
+        #             tot_varp=tot_varp,
+        #         )
+        #         for k_i, opttype_i in zip(k, opttype, strict=True)
+        #     ]
+        # )
+        # return utils.black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
 
     def mean_proxy(self, T, n_quad=30, quad_scipy=True):
         r"""
