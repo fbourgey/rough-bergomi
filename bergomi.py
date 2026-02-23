@@ -74,8 +74,7 @@ class OneFactorBergomi:
     def _f_xi(self, t, u, x):
         """
         Helper function to compute the forward variance at time t for maturity u
-        given the OU factor X_t = x.
-            xi_t(u) = xi_0(u) * f^u(t, x)
+        given the OU factor X_t = x where xi_t(u) = xi_0(u) * f^u(t, x).
         """
         _exp = np.exp(-self.k * (u - t))
         return np.exp(self.w * _exp * x - 0.5 * self.w**2 * _exp**2 * self.var_x(t))

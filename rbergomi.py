@@ -1,5 +1,5 @@
 from collections.abc import Callable
-
+from model import ForwardVarianceModel
 import numpy as np
 from scipy import integrate, optimize, special, stats
 from tqdm import tqdm
@@ -14,7 +14,7 @@ from utils_vix import (
 )
 
 
-class RoughBergomi:
+class RoughBergomi(ForwardVarianceModel):
     """
     Implementation of the rough Bergomi model.
 
@@ -51,34 +51,15 @@ class RoughBergomi:
         Initialize the rough Bergomi model.
         See class docstring for parameter definitions.
         """
+        super().__init__(xi0=xi0, rho=rho, s0=s0, delta_vix=delta_vix)
+
         if H <= 0.0:
             raise ValueError("Hurst parameter H must be positive.")
-        if s0 <= 0.0:
-            raise ValueError("Initial spot price s0 must be positive.")
         if eta <= 0.0:
             raise ValueError("Volatility of volatility eta must be positive.")
-        if not (-1.0 <= rho <= 1.0):
-            raise ValueError("Correlation rho must be in [-1, 1].")
-        if not callable(xi0):
-            raise ValueError("xi0 must be a callable function.")
-        # Check positivity for a range of t >= 0
-        t_test = np.linspace(1e-10, 10, 1000)
-        if not np.all(xi0(t_test) > np.array([0.0])):
-            raise ValueError("xi0 must be positive for all t >= 0.")
 
-        self.s0 = s0
-        self.xi0 = xi0
-        self.xi0_0 = self.xi0(np.zeros(1))[0]
-        self.xi0_flat = self._is_xi0_flat()
         self.H = H
         self.eta = eta
-        self.rho = rho
-        self.delta_vix = delta_vix
-
-    def _is_xi0_flat(self) -> bool:
-        """Check if the forward variance curve xi0 is flat."""
-        t_test = np.linspace(1e-10, 10, 1000)
-        return np.allclose(self.xi0(t_test), self.xi0_0)
 
     def kernel(self, u, t):
         """
@@ -874,41 +855,6 @@ class RoughBergomi:
         return (y - self.rho * G) ** 2 / (
             2.0 * (1.0 - self.rho**2) * F
         ) + 0.5 * norm_h_fourier_squared
-
-    def fut_vix2(self, T: float) -> float:
-        r"""
-        Compute the fair value of a VIX squared futures contract at maturity T. It
-        corresponds to:
-
-            E[VIX_T^2] = 1/delta \int_{T}^{T+delta} \xi_0^u du
-
-        where delta is the VIX window (30/365 years by default) and xi0(u) is the
-        forward variance curve.
-
-        Parameters
-        ----------
-        T : float
-            Maturity of the VIX future (must be non-negative).
-
-        Returns
-        -------
-        float
-            Fair value of the VIX squared futures contract at time T.
-
-        Raises
-        ------
-        ValueError
-            If T is negative.
-
-        Notes
-        -----
-        This is a model-free quantity, depending only on the forward variance curve.
-        """
-        if T < 0:
-            raise ValueError("Maturity T must be non-negative.")
-
-        integral, _ = integrate.quad(lambda u: self.xi0(u), T, T + self.delta_vix)
-        return integral / self.delta_vix
 
     def simulate_vix(
         self,
