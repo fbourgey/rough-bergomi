@@ -1,5 +1,6 @@
 from collections.abc import Callable
 import numpy as np
+from scipy import stats
 from model import ForwardVarianceModel
 
 from utils import black_impvol, gauss_hermite, gauss_legendre
@@ -115,21 +116,21 @@ class OneFactorBergomi(ForwardVarianceModel):
         float
             Estimated VIX option price at maturity T.
         """
-        x_herm, w_herm = gauss_hermite(n_quad)
         v_leg, w_leg = gauss_legendre(0, 1, n_quad)
         std_x = self.var_x(T) ** 0.5
+        x_norm = stats.norm.ppf(v_leg)
         xi0_leg = self.xi0(T + v_leg * self.delta_vix)
-        vix2_herm = np.array(
+        vix2_norm = np.array(
             [
                 np.sum(
                     w_leg
                     * xi0_leg
                     * self._f_xi(t=T, u=v_leg * self.delta_vix + T, x=std_x * x)
                 )
-                for x in x_herm
+                for x in x_norm
             ]
         )
-        return np.sum(w_herm * _vix_payoff(opt_payoff, K=K)(vix2_herm))
+        return np.sum(w_leg * _vix_payoff(opt_payoff, K=K)(vix2_norm))
 
     def implied_vol_vix(self, k, T, n_quad, lbd=None, eta_2=None) -> np.ndarray:
         """
@@ -159,9 +160,12 @@ class OneFactorBergomi(ForwardVarianceModel):
         otm_price = np.array(
             [
                 self.price_vix(
-                    T=T, n_quad=n_quad, opt_payoff="call" if otm else "put", K=K_i
+                    T=T,
+                    n_quad=n_quad,
+                    opt_payoff="put" if opttype[i] == -1 else "call",
+                    K=K_i,
                 )
-                for K_i, otm in zip(K, opttype, strict=True)
+                for i, K_i in enumerate(K)
             ]
         )
         return black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)

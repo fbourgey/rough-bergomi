@@ -2028,7 +2028,7 @@ class RoughBergomi(ForwardVarianceModel):
         return gamma_3
 
     ####################################################################################
-    # VIX implied volatility expansions - Ankush Agarwal and Ying Liao
+    # VIX implied volatility expansions
     ####################################################################################
 
     def implied_vol_vix_expansion(self, k, T, order: int = 0):

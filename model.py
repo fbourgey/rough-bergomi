@@ -698,3 +698,51 @@ class ForwardVarianceModel(ABC):
             ]
         )
         return utils.black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
+
+    ####################################################################################
+    # VIX implied volatility expansions
+    ####################################################################################
+
+    def implied_vol_vix_expansion(self, k, T, order: int = 0):
+        """
+        Compute VIX implied volatility expansion.
+
+        Parameters
+        ----------
+        k : float or array_like
+            Log-moneyness (k = log(K/F)).
+        T : float
+            Time to maturity (T > 0).
+        order : {0, 1, 2}, optional
+            Expansion order (default 0).
+
+        Returns
+        -------
+        float or ndarray
+            Approximated implied volatility, same shape as `k`.
+
+        Raises
+        ------
+        ValueError
+            If `order` not in {0,1,2} or if `T <= 0`.
+        """
+        if order not in [0, 1, 2]:
+            raise ValueError("order must be one of 0, 1, or 2.")
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+
+        tot_var_proxy = self.var_proxy(T)
+        vol_proxy = np.sqrt(tot_var_proxy / T)
+        gamma_2 = self.gamma_2_proxy(T)
+        gamma_3 = self.gamma_3_proxy(T)
+        xp = 0.5 * self.mean_proxy(T) + tot_var_proxy / 8
+
+        if order == 0:
+            return 0.5 * vol_proxy + 0.0 * k
+        else:
+            return (
+                0.5 * vol_proxy
+                + gamma_2 / (2 * vol_proxy * T)
+                + 3 * gamma_3 / (8 * vol_proxy * T)
+                - gamma_3 * (xp - k) / (vol_proxy**3 * T**2)
+            )

@@ -12,6 +12,26 @@ IMPVOL_MIN = 1e-10
 IMPVOL_MAX = 5.0
 
 
+def relative_error(true_value, approx_value):
+    """
+    Calculate the relative error between a true value and an approximate value.
+
+    Parameters
+    ----------
+    true_value : float
+        The true value.
+    approx_value : float
+        The approximate value.
+
+    Returns
+    -------
+    float
+        The relative error, defined as (approx_value - true_value) / true_value.
+        Returns NaN if true_value is zero to avoid division by zero.
+    """
+    return np.where(true_value == 0, np.nan, (approx_value - true_value) / true_value)
+
+
 def gauss_legendre(a: float, b: float, n: int) -> tuple[np.ndarray, np.ndarray]:
     """
     Compute the Gauss-Legendre quadrature points and weights on the interval [a, b].
