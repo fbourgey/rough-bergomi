@@ -1,11 +1,12 @@
-import numpy as np
 from collections.abc import Callable
+import numpy as np
+from model import ForwardVarianceModel
 
-from utils import gauss_hermite, gauss_legendre
+from utils import black_impvol, gauss_hermite, gauss_legendre
 from utils_vix import _vix_payoff
 
 
-class OneFactorBergomi:
+class OneFactorBergomi(ForwardVarianceModel):
     """
     Implementation of the one-factor Bergomi model.
 
@@ -36,34 +37,31 @@ class OneFactorBergomi:
         Initialize the one-factor Bergomi model.
         See class docstring for parameter definitions.
         """
+        super().__init__(xi0=xi0, rho=rho, s0=s0, delta_vix=delta_vix)
         if k <= 0.0:
             raise ValueError("Speed of mean reversion k must be positive.")
-        if s0 <= 0.0:
-            raise ValueError("Initial spot price s0 must be positive.")
         if w <= 0.0:
             raise ValueError("Volatility of volatility w must be positive.")
-        if not (-1.0 <= rho <= 1.0):
-            raise ValueError("Correlation rho must be in [-1, 1].")
-        if not callable(xi0):
-            raise ValueError("xi0 must be a callable function.")
-        # Check positivity for a range of t >= 0
-        t_test = np.linspace(1e-10, 10, 1000)
-        if not np.all(xi0(t_test) > np.array([0.0])):
-            raise ValueError("xi0 must be positive for all t >= 0.")
-
-        self.s0 = s0
-        self.xi0 = xi0
-        self.xi0_0 = self.xi0(np.zeros(1))[0]
-        self.xi0_flat = self._is_xi0_flat()
         self.k = k
         self.w = w
-        self.rho = rho
-        self.delta_vix = delta_vix
 
-    def _is_xi0_flat(self) -> bool:
-        """Check if the forward variance curve xi0 is flat."""
-        t_test = np.linspace(1e-10, 10, 1000)
-        return np.allclose(self.xi0(t_test), self.xi0_0)
+    def kernel(self, u, t):
+        """
+        Compute the one-factor Bergomi kernel function w * exp(-k * (u - t)).
+
+        Parameters
+        ----------
+        u : float or np.ndarray
+            Upper time(s) (must satisfy u > t).
+        t : float or np.ndarray
+            Lower time(s).
+
+        Returns
+        -------
+        float or np.ndarray
+            Value(s) of the kernel.
+        """
+        return self.w * np.exp(-self.k * (u - t))
 
     def var_x(self, t):
         if self.k == 0:
@@ -93,17 +91,9 @@ class OneFactorBergomi:
         Returns
         -------
         float
-            Estimated VIX futures price at maturity T.
+            VIX futures price at maturity T.
         """
-
-        x_herm, w_herm = gauss_hermite(n_quad)
-        x_leg, w_leg = gauss_legendre(T, T + self.delta_vix, n_quad)
-        std_x = self.var_x(T) ** 0.5
-        xi0_leg = self.xi0(x_leg)
-        vix2_herm = np.array(
-            [np.sum(w_leg * xi0_leg * self._f_xi(T, x_leg, x / std_x)) for x in x_herm]
-        )
-        return np.sum(w_herm * vix2_herm**0.5)
+        return self.price_vix(T=T, n_quad=n_quad, opt_payoff="fut")
 
     def price_vix(self, T, n_quad, opt_payoff, K=0.0, lbd=None, eta_2=None):
         """
@@ -125,13 +115,53 @@ class OneFactorBergomi:
         float
             Estimated VIX option price at maturity T.
         """
-
         x_herm, w_herm = gauss_hermite(n_quad)
-        x_leg, w_leg = gauss_legendre(T, T + self.delta_vix, n_quad)
+        v_leg, w_leg = gauss_legendre(0, 1, n_quad)
         std_x = self.var_x(T) ** 0.5
-        xi0_leg = self.xi0(x_leg)
+        xi0_leg = self.xi0(T + v_leg * self.delta_vix)
         vix2_herm = np.array(
-            [np.sum(w_leg * xi0_leg * self._f_xi(T, x_leg, x / std_x)) for x in x_herm]
+            [
+                np.sum(
+                    w_leg
+                    * xi0_leg
+                    * self._f_xi(t=T, u=v_leg * self.delta_vix + T, x=std_x * x)
+                )
+                for x in x_herm
+            ]
         )
-        payoff = _vix_payoff(opt_payoff, K=K)
-        return np.sum(w_herm * payoff(vix2_herm))
+        return np.sum(w_herm * _vix_payoff(opt_payoff, K=K)(vix2_herm))
+
+    def implied_vol_vix(self, k, T, n_quad, lbd=None, eta_2=None) -> np.ndarray:
+        """
+        Compute the implied volatility of a VIX option at a given log-moneyness
+        using Monte Carlo simulation.
+
+        Parameters
+        ----------
+        k : float or np.ndarray
+            Log-moneyness of the VIX option (typically 0 for ATM). Can be a scalar
+            or array.
+        T : float
+            Maturity of the VIX option.
+        n_quad : int
+            Number of quadrature points for numerical integration.
+
+        Returns
+        -------
+        np.ndarray
+            Implied volatility values for the VIX option(s) at the specified
+            log-moneyness.
+        """
+        F = self.price_vix(T=T, n_quad=n_quad, opt_payoff="fut")
+        k = np.atleast_1d(np.asarray(k))
+        K = F * np.exp(k)
+        opttype = 2 * (K >= F) - 1
+        otm_price = np.array(
+            [
+                self.price_vix(
+                    T=T, n_quad=n_quad, opt_payoff="call" if otm else "put", K=K_i
+                )
+                for K_i, otm in zip(K, opttype, strict=True)
+            ]
+        )
+        return black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
