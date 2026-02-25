@@ -1,16 +1,17 @@
 from collections.abc import Callable
-from model import ForwardVarianceModel
+
 import numpy as np
 from scipy import integrate, optimize, special, stats
 from tqdm import tqdm
 
 import utils
+from model import ForwardVarianceModel
 from utils_vix import (
     _deriv_vix_payoff_mixed,
     _hermite_polynomial_weights,
+    _inverse_mixture_lognormal,
     _inverse_x_inner_mixed_func,
     _vix_payoff,
-    _inverse_mixture_lognormal,
 )
 
 
@@ -978,6 +979,12 @@ class RoughBergomi(ForwardVarianceModel):
             Default is 'trap'.
         seed : int or None, optional
             Random seed for reproducibility. Default is None.
+        lbd : float or None, optional
+            If provided, use a mixed model with two different eta values.
+            lbd is the weight for the first eta value.
+        eta_2 : float or None, optional
+            If provided, use a mixed model with two different eta values.
+            This is the second eta value. Must be provided if `lbd` is not None.
 
         Returns
         -------

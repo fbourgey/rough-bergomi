@@ -1,8 +1,9 @@
 from collections.abc import Callable
+
 import numpy as np
 from scipy import stats
-from model import ForwardVarianceModel
 
+from model import ForwardVarianceModel
 from utils import black_impvol, gauss_hermite, gauss_legendre
 from utils_vix import _vix_payoff
 
@@ -96,7 +97,7 @@ class OneFactorBergomi(ForwardVarianceModel):
         """
         return self.price_vix(T=T, n_quad=n_quad, opt_payoff="fut")
 
-    def price_vix(self, T, n_quad, opt_payoff, K=0.0, lbd=None, eta_2=None):
+    def price_vix(self, T, n_quad, opt_payoff, K=0.0, lbd=None, w_2=None):
         """
         Estimate the price of a VIX option at maturity T using Gauss
         quadrature.
@@ -111,6 +112,12 @@ class OneFactorBergomi(ForwardVarianceModel):
             Type of option payoff ('call' or 'put').
         K : float, optional
             Strike price of the option (default is 0.0).
+        lbd : float or None, optional
+            If provided, use a mixed model with two different eta values.
+            lbd is the weight for the first eta value.
+        w_2 : float or None, optional
+            If provided, use a mixed model with two different w values.
+            This is the second w value. Must be provided if `lbd` is not None.
         Returns
         -------
         float
@@ -120,19 +127,25 @@ class OneFactorBergomi(ForwardVarianceModel):
         std_x = self.var_x(T) ** 0.5
         x_norm = stats.norm.ppf(v_leg)
         xi0_leg = self.xi0(T + v_leg * self.delta_vix)
-        vix2_norm = np.array(
-            [
-                np.sum(
-                    w_leg
-                    * xi0_leg
-                    * self._f_xi(t=T, u=v_leg * self.delta_vix + T, x=std_x * x)
-                )
-                for x in x_norm
-            ]
-        )
+        u_leg = v_leg * self.delta_vix + T
+        if lbd is not None and w_2 is not None:
+            onebergomi_2 = self.__class__(
+                s0=self.s0, xi0=self.xi0, k=self.k, w=w_2, rho=self.rho
+            )
+
+            def _f(x):
+                return lbd * self._f_xi(t=T, u=u_leg, x=std_x * x) + (
+                    1 - lbd
+                ) * onebergomi_2._f_xi(t=T, u=u_leg, x=std_x * x)
+        else:
+
+            def _f(x):
+                return self._f_xi(t=T, u=u_leg, x=std_x * x)
+
+        vix2_norm = np.array([np.sum(w_leg * xi0_leg * _f(x)) for x in x_norm])
         return np.sum(w_leg * _vix_payoff(opt_payoff, K=K)(vix2_norm))
 
-    def implied_vol_vix(self, k, T, n_quad, lbd=None, eta_2=None) -> np.ndarray:
+    def implied_vol_vix(self, k, T, n_quad, lbd=None, w_2=None) -> np.ndarray:
         """
         Compute the implied volatility of a VIX option at a given log-moneyness
         using Monte Carlo simulation.
@@ -146,6 +159,12 @@ class OneFactorBergomi(ForwardVarianceModel):
             Maturity of the VIX option.
         n_quad : int
             Number of quadrature points for numerical integration.
+        lbd : float or None, optional
+            If provided, use a mixed model with two different eta values.
+            lbd is the weight for the first eta value.
+        w_2 : float or None, optional
+            If provided, use a mixed model with two different w values.
+            This is the second w value. Must be provided if `lbd` is not None.
 
         Returns
         -------
@@ -164,6 +183,8 @@ class OneFactorBergomi(ForwardVarianceModel):
                     n_quad=n_quad,
                     opt_payoff="put" if opttype[i] == -1 else "call",
                     K=K_i,
+                    lbd=lbd,
+                    w_2=w_2,
                 )
                 for i, K_i in enumerate(K)
             ]
