@@ -1,10 +1,18 @@
-from collections.abc import Callable
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import numpy as np
-from scipy import integrate
+from scipy import integrate, stats
+from scipy.special import eval_hermitenorm
 
 import utils
+from utils_vix import (
+    _deriv_vix_payoff_mixed,
+    _hermite_polynomial_weights,
+    _inverse_mixture_lognormal,
+    _inverse_x_inner_mixed_func,
+    _vix_payoff,
+)
 
 
 class ForwardVarianceModel(ABC):
@@ -12,50 +20,84 @@ class ForwardVarianceModel(ABC):
         self,
         xi0: Callable[[np.ndarray], np.ndarray],
         rho: float,
+        params: dict,
+        name: str,
         s0: float = 1.0,
-        delta_vix: float = 1.0 / 12.0,
     ) -> None:
         """
         Initialize ForwardVarianceModel.
 
         Parameters
         ----------
-        s0 : float
-            Initial spot price (must be positive).
         xi0 : callable
             Forward variance curve function xi0(t), must return positive values for
             t >= 0.
         rho : float
             Correlation between the spot and the volatility processes
             (must be in [-1, 1]).
+        params : dict
+            Model-specific parameters.
+        name : str
+            Name of the model.
+        s0 : float
+            Initial spot price (must be positive).
         """
         if s0 <= 0.0:
             raise ValueError("Initial spot price s0 must be positive.")
+
         if not (-1.0 <= rho <= 1.0):
             raise ValueError("Correlation rho must be in [-1, 1].")
+
         if not callable(xi0):
             raise ValueError("xi0 must be a callable function.")
-        # Check positivity for a range of t >= 0
-        t_test = np.linspace(1e-10, 10, 1000)
-        if not np.all(xi0(t_test) > np.array([0.0])):
-            raise ValueError("xi0 must be positive for all t >= 0.")
 
-        self.s0 = s0
         self.xi0 = xi0
+        self._is_xi0_positive()
         self.xi0_0 = self.xi0(np.zeros(1))[0]
         self.xi0_flat = self._is_xi0_flat()
         self.rho = rho
-        self.delta_vix = delta_vix
+        self.params = params
+        self.name = name
+        self.s0 = s0
+        self.delta_vix = 1.0 / 12.0
 
     @abstractmethod
     def kernel(self, u, t) -> float | np.ndarray:
-        """Compute the model-specific kernel function."""
+        """
+        Compute the model-specific kernel function.
+
+        Parameters
+        ----------
+        u : float or np.ndarray
+            Upper time(s) (must satisfy u >= t).
+        t : float or np.ndarray
+            Lower time(s).
+
+        Returns
+        -------
+        float or np.ndarray
+            Value(s) of the kernel function evaluated at (u, t).
+        """
         pass
+
+    def _clone_with_params(self, **updates):
+        """Return a new model instance with updated params."""
+        params = self.params.copy()
+        params.update(updates)
+        return self.__class__(
+            s0=self.s0, xi0=self.xi0, rho=self.rho, name=self.name, params=params
+        )
 
     def _is_xi0_flat(self) -> bool:
         """Check if the forward variance curve xi0 is flat."""
         t_test = np.linspace(1e-10, 10, 1000)
         return np.allclose(self.xi0(t_test), self.xi0_0)
+
+    def _is_xi0_positive(self):
+        """Check if the forward variance curve xi0 is positive for t >= 0."""
+        t_test = np.linspace(1e-10, 10, 1000)
+        if not np.all(self.xi0(t_test) > np.array([0.0])):
+            raise ValueError("xi0 must be positive for all t >= 0.")
 
     def fut_vix2(self, T: float) -> float:
         r"""
@@ -699,10 +741,6 @@ class ForwardVarianceModel(ABC):
         )
         return utils.black_impvol(K=K, T=T, F=F, value=otm_price, opttype=opttype)
 
-    ####################################################################################
-    # VIX implied volatility expansions
-    ####################################################################################
-
     def implied_vol_vix_expansion(self, k, T, order: int = 0):
         """
         Compute VIX implied volatility expansion.
@@ -746,3 +784,681 @@ class ForwardVarianceModel(ABC):
                 + 3 * gamma_3 / (8 * vol_proxy * T)
                 - gamma_3 * (xp - k) / (vol_proxy**3 * T**2)
             )
+
+    ####################################################################################
+    # Mixed case approximation methods for VIX pricing
+    ####################################################################################
+
+    def _validate_mixed_params(self, T, lbd, volvol_2, opt_payoff, order, n_quad):
+        """Validate parameters for price_vix_approx_mixed."""
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+        if not 0.0 <= lbd <= 1.0:
+            raise ValueError("lbd must be in the interval [0, 1].")
+        if volvol_2 <= 0.0:
+            raise ValueError("volvol_2 must be positive.")
+        if opt_payoff not in ["fut", "call", "put"]:
+            raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
+        if order not in [0, 1, 2, 3]:
+            raise ValueError("order must be one of 0, 1, 2, or 3.")
+        if n_quad is not None and n_quad <= 0:
+            raise ValueError("n_quad must be a positive integer or None.")
+
+    def _get_params_mixed(self, T, lbd, volvol_2, order):
+        """Compute parameters for price_vix_approx_mixed."""
+        # Create model with vol-of-vol=volvol_2
+        if self.name == "rough_bergomi":
+            model_2 = self._clone_with_params(eta=volvol_2)
+        elif self.name == "one_factor_bergomi":
+            model_2 = self._clone_with_params(w=volvol_2)
+        else:
+            raise ValueError(
+                "model name not one of 'rough_bergomi' or 'one_factor_bergomi'."
+            )
+
+        # Parameters common to both regimes
+        fvix2 = self.fut_vix2(T)
+        log_fvix2 = np.log(fvix2)
+
+        # Mean proxy and variance proxy for both regimes
+        mean_1 = log_fvix2 + self.mean_proxy(T)
+        mean_2 = log_fvix2 + model_2.mean_proxy(T)
+        sig_1 = self.var_proxy(T) ** 0.5
+        sig_2 = model_2.var_proxy(T) ** 0.5
+
+        volvol_1 = (
+            self.params["eta"] if self.name == "rough_bergomi" else self.params["w"]
+        )
+
+        # Initialize params dictionary
+        params = {
+            "fvix2": fvix2,
+            "volvol_1": volvol_1,
+            "volvol_2": volvol_2,
+            "lbd": lbd,
+            "meanp_1": mean_1,
+            "meanp_2": mean_2,
+            "sigp_1": sig_1,
+            "sigp_2": sig_2,
+        }
+
+        # Compute gamma parameters as needed
+        if order >= 1:
+            params["gamma_1"] = (self.gamma_1_proxy(T=T), model_2.gamma_1_proxy(T=T))
+        if order >= 2:
+            params["gamma_2"] = (self.gamma_2_proxy(T=T), model_2.gamma_2_proxy(T=T))
+        if order == 3:
+            params["gamma_3"] = (self.gamma_3_proxy(T=T), model_2.gamma_3_proxy(T=T))
+
+        return params
+
+    def price_vix_approx_mixed(
+        self,
+        T: float,
+        lbd: float,
+        volvol_2: float,
+        opt_payoff: str,
+        order: int,
+        n_quad: int | None = 50,
+        K: float = 0.0,
+        n_trunc_herm: int | None = 0,
+    ):
+        """
+        Price a VIX option in the mixed case using the weak approximation.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX option.
+        lbd : float
+            Mixing parameter between the two regimes.
+        volvol_2 : float
+            Volatility of volatility parameter for the second regime.
+        opt_payoff : str
+            Payoff function of the option, e.g., "call" for a call option. Use "put"
+            for a put option, or "fut" for a future payoff.
+        order : int
+            Order of the approximation expansion.
+        n_quad : int | None = 50
+            Number of quadrature points for numerical integration. If n_quad is None,
+            scipy integrate.quad is used.
+        K : float, optional (default is 0.0)
+            Strike of the VIX option.
+        n_trunc_herm : int | None, optional (default is 0)
+            If greater than 0, use Hermite series expansion with truncation order
+            n_trunc_herm for the order 0 approximation.
+
+        Returns
+        -------
+        float
+            Approximated price of the VIX option using the mixed method.
+        """
+        # Validation
+        self._validate_mixed_params(T, lbd, volvol_2, opt_payoff, order, n_quad)
+
+        # Use Hermite series expansion for order 0 if specified
+        if n_trunc_herm and n_trunc_herm > 0:
+            return self.price_vix_approx_mixed_series(
+                T=T,
+                lbd=lbd,
+                volvol_2=volvol_2,
+                opt_payoff=opt_payoff,
+                order=order,
+                n_quad=n_quad,
+                n_trunc_herm=n_trunc_herm,
+                K=K,
+            )
+
+        # Get parameters once
+        params = self._get_params_mixed(T, lbd, volvol_2, order)
+
+        # Accumulate price contributions up to requested order
+        prices = {}
+        total_price = 0.0
+        for current_order in range(order + 1):
+            prices[current_order] = _compute_price_mixed(
+                n_quad, K, opt_payoff, params, order=current_order
+            )
+            total_price += prices[current_order]
+
+        return total_price
+
+    def price_vix_approx_mixed_series(
+        self, T, lbd, volvol_2, opt_payoff, order, n_quad, n_trunc_herm, K=0.0
+    ):
+        """
+        Approximate the price a VIX option in the mixed case using Hermite
+        series expansion.
+        """
+        params = self._get_params_mixed(T, lbd, volvol_2, order)
+        meanp_1 = params["meanp_1"]
+        meanp_2 = params["meanp_2"]
+        sigp_1 = params["sigp_1"]
+        sigp_2 = params["sigp_2"]
+
+        if order != 0:
+            raise NotImplementedError(
+                "Hermite series expansion is only implemented for order=0."
+            )
+
+        if opt_payoff == "fut":
+            # Gauss-Hermite quadrature
+            price_0 = self.price_vix_approx_mixed(
+                T=T,
+                lbd=lbd,
+                volvol_2=volvol_2,
+                opt_payoff="fut",
+                order=order,
+                n_quad=n_quad,
+            )
+        else:
+            A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+            B = A - sigp_2 / 2
+            a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
+            b = (lbd / (1 - lbd)) * np.exp(
+                meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
+            )
+            c = sigp_1 - sigp_2
+            weights_herm = _hermite_polynomial_weights(n_trunc_herm, b, c, n_quad)
+            sgn = 1.0 if opt_payoff == "call" else -1.0
+
+            I_N = weights_herm[0] * stats.norm.cdf(-sgn * B) + sgn * np.sum(
+                weights_herm[1:]
+                * eval_hermitenorm(np.arange(n_trunc_herm), B)
+                * stats.norm.pdf(B)
+            )
+            price_0 = sgn * a * I_N - sgn * K * stats.norm.cdf(-sgn * A)
+
+        return price_0
+
+    def implied_vol_vix_approx_mixed(
+        self,
+        T: float,
+        k: float | np.ndarray,
+        order: int,
+        lbd: float,
+        volvol_2: float,
+        n_quad: int | None = 50,
+        return_opt="impvol",
+        n_trunc_herm: int | None = 0,
+    ):
+        """
+        Compute the implied volatility of a VIX option using a mixed
+        approximation method.
+
+        Parameters
+        ----------
+        T : float
+            Maturity of the VIX option.
+        k : float | np.ndarray
+            Log-moneyness of the VIX option.
+        order : int
+            Order of the approximation expansion.
+        lbd : float
+            Mixing parameter between the two regimes.
+        volvol_2 : float
+            Volatility of volatility parameter for the second regime.
+        n_quad : int | None
+            Number of quadrature points for numerical integration.
+        return_opt : str, optional
+            If 'impvol', return only the implied volatility.
+            If 'all', return both the futures price and the implied volatility.
+        n_trunc_herm : int | None, optional
+            If greater than 0, use Hermite series expansion with truncation order
+            n_trunc_herm for the order 0 approximation.
+
+        Returns
+        -------
+        float or tuple
+            Approximated Black-Scholes implied volatility for the VIX option, or a tuple
+            containing the futures price and the implied volatility if return_opt is
+            'all'.
+        """
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+
+        if lbd < 0 or lbd > 1:
+            raise ValueError("lbd must be in the interval [0, 1].")
+
+        if volvol_2 < 0:
+            raise ValueError("volvol_2 must be non-negative.")
+
+        if n_quad is not None and n_quad <= 0:
+            raise ValueError("n_quad must be a positive integer or None.")
+
+        if order not in [0, 1, 2, 3]:
+            raise ValueError("order must be one of 0, 1, 2, or 3.")
+
+        if return_opt not in ["impvol", "all"]:
+            raise ValueError("return_opt must be either 'impvol' or 'all'.")
+
+        F = self.price_vix_approx_mixed(
+            T=T,
+            lbd=lbd,
+            volvol_2=volvol_2,
+            opt_payoff="fut",
+            order=order,
+            n_quad=n_quad,
+            n_trunc_herm=n_trunc_herm,
+        )
+        k = np.atleast_1d(np.asarray(k))
+        K = F * np.exp(k)
+        opttype = 2 * (K >= F) - 1
+        otm_price = np.array(
+            [
+                self.price_vix_approx_mixed(
+                    T=T,
+                    K=K_i,
+                    lbd=lbd,
+                    volvol_2=volvol_2,
+                    opt_payoff="call" if opttype_i == 1 else "put",
+                    order=order,
+                    n_quad=n_quad,
+                    n_trunc_herm=n_trunc_herm,
+                )
+                for K_i, opttype_i in zip(K, opttype, strict=True)
+            ]
+        )
+        impvol_approx = utils.black_impvol(
+            K=K, T=T, F=F, value=otm_price, opttype=opttype
+        )
+        if return_opt == "all":
+            return F, impvol_approx
+        else:
+            return impvol_approx
+
+    def implied_vol_vix_lognorm_approx_mixed(
+        self, T: float, k: float | np.ndarray, order: int, lbd: float, volvol_2: float
+    ):
+        """
+        Compute the implied volatility of a VIX option approximating the sum of two
+        lognormal distributions with a single lognormal distribution in the mixed case.
+        """
+        if order != 0:
+            raise NotImplementedError(
+                "Lognormal approximation is only implemented for order=0."
+            )
+        params = self._get_params_mixed(T, lbd, volvol_2, order)
+        lbd = params["lbd"]
+        meanp_1 = params["meanp_1"]
+        meanp_2 = params["meanp_2"]
+        sigp_1 = params["sigp_1"]
+        sigp_2 = params["sigp_2"]
+        params_lognorm = utils.sum_lognorm_single_lognorm_approx(
+            lbd=lbd,
+            mu_1=meanp_1,
+            mu_2=meanp_2,
+            sig_1=sigp_1,
+            sig_2=sigp_2,
+        )
+        meanp = params_lognorm["mu_y"]
+        tot_varp = params_lognorm["sig_y"] ** 2
+        return self.implied_vol_vix_approx(
+            T=T,
+            k=k,
+            order=order,
+            meanp=meanp,
+            tot_varp=tot_varp,
+        )
+
+    def implied_vol_vix_shifted_lognorm_approx_mixed(
+        self, T: float, k: float | np.ndarray, order: int, lbd: float, volvol_2: float
+    ):
+        """
+        Compute the implied volatility of a VIX option approximating the sum of two
+        lognormal distributions with a single shifted lognormal distribution in the
+        mixed case.
+        """
+        if order != 0:
+            raise NotImplementedError(
+                "Shifted lognormal approximation is only implemented for order=0."
+            )
+        params = self._get_params_mixed(T, lbd, volvol_2, order)
+        # shifted lognormal parameters
+        params_sl = utils.sqrt_sum_lognorm_shifted_lognorm_approx(
+            lbd=params["lbd"],
+            mu_1=params["meanp_1"],
+            mu_2=params["meanp_2"],
+            sig_1=params["sigp_1"],
+            sig_2=params["sigp_2"],
+        )
+        meanp = 2 * params_sl["mu_y"]
+        tot_varp = (2 * params_sl["sig_y"]) ** 2
+        c_y = params_sl["c_y"]
+
+        return self.implied_vol_vix_approx(
+            T=T,
+            k=np.log(np.exp(k) - c_y),
+            order=order,
+            meanp=meanp,
+            tot_varp=tot_varp,
+        )
+
+    def implied_vol_vix_expansion_mixed(
+        self,
+        K,
+        T,
+        lbd,
+        volvol_2,
+        order,
+        opt,
+        n_quad=30,
+        n_trunc_herm=10,
+    ):
+        """
+        Compute VIX implied volatility expansion in the mixed case.
+
+        Parameters
+        ----------
+        K : float or array_like
+            Strike price.
+        T : float
+            Time to maturity (T > 0).
+        lbd : float
+            Mixing weight in [0, 1].
+        volvol_2 : float
+            Volatility of volatility parameter for the second regime.
+        order : {0, 1, 2}
+            Expansion order.
+        opt : {1, 2, 3}
+            Type of approximation method.
+
+        Returns
+        -------
+        float or ndarray
+            Approximated implied volatility, same shape as `k`.
+
+        Raises
+        ------
+        ValueError
+            If `order` not in {0,1,2} or if `T <= 0`.
+        """
+        # TODO: finish and check implementation
+        # this is probably wrong as of now
+        if opt not in [1, 2, 3]:
+            raise ValueError("opt 1, 2, or 3 must be specified.")
+
+        if order not in [0, 1, 2]:
+            raise ValueError("order must be one of 0, 1, or 2.")
+
+        if order != 0.0:
+            raise NotImplementedError(
+                "Mixed expansion is only implemented for order 0."
+            )
+
+        if T <= 0:
+            raise ValueError("Maturity T must be positive.")
+
+        # create new instance with volvol_2 parameter
+        if self.name == "rough_bergomi":
+            model_2 = self._clone_with_params(volvol=volvol_2)
+        elif self.name == "one_factor_bergomi":
+            model_2 = self._clone_with_params(w=volvol_2)
+        else:
+            raise ValueError(
+                "model name not one of 'rough_bergomi' or 'one_factor_bergomi'."
+            )
+
+        fvix2 = self.fut_vix2(T)
+        meanp_1 = np.log(fvix2) + self.mean_proxy(T)
+        meanp_2 = np.log(fvix2) + model_2.mean_proxy(T)
+        sigp_1 = self.var_proxy(T) ** 0.5
+        sigp_2 = model_2.var_proxy(T) ** 0.5
+        A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+        B = A - sigp_2 / 2
+
+        a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
+        b = (lbd / (1 - lbd)) * np.exp(
+            meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
+        )
+        c = sigp_1 - sigp_2
+        weights_herm = _hermite_polynomial_weights(n_trunc_herm, b, c, n_quad)
+
+        k1 = K
+        x1 = k1 - 0.5 * B * sigp_2 - sigp_2**2 / 8
+        price_fut = self.price_vix_approx_mixed(
+            T=T,
+            lbd=lbd,
+            volvol_2=volvol_2,
+            opt_payoff="fut",
+            order=order,
+            n_trunc_herm=n_trunc_herm,
+        )
+        x2 = np.log(float(price_fut))
+        # k2 = x2 + 0.5 * B * sigp_2 + sigp_2**2 / 8
+        x3 = 0.5 * (x1 + x2)
+        # k3 = 0.5 * (k1 + k2)
+
+        sig_tilde = sigp_2 / np.sqrt(T)
+        gamma_1_2 = model_2.gamma_1_proxy(T)
+        gamma_2_2 = model_2.gamma_2_proxy(T)
+        gamma_3_2 = model_2.gamma_3_proxy(T)
+
+        c0 = (1 + 0.5 * gamma_1_2 + 0.25 * gamma_2_2 + 0.125 * gamma_3_2) * a
+
+        if order == 0:
+            if opt == 1:
+                x_opt = x1
+            elif opt == 2:
+                x_opt = x2
+            elif opt == 3:
+                x_opt = x3
+
+            impvol = 0.5 * sig_tilde + c0 * np.sum(
+                weights_herm[1:] * eval_hermitenorm(np.arange(n_trunc_herm), B)
+            ) / (np.exp(x_opt) * np.sqrt(T))
+
+        return impvol
+
+
+def _compute_price_0_mixed(n_quad, K, opt_payoff, params):
+    """Compute order 0 vix option price in the mixed case."""
+    lbd = params["lbd"]
+    meanp_1 = params["meanp_1"]
+    meanp_2 = params["meanp_2"]
+    sigp_1 = params["sigp_1"]
+    sigp_2 = params["sigp_2"]
+    payoff = _vix_payoff(opt_payoff, K)
+
+    if n_quad is None:
+        price_0 = integrate.quad(
+            lambda x: payoff(
+                lbd * np.exp(meanp_1 + sigp_1 * stats.norm.ppf(x))
+                + (1.0 - lbd) * np.exp(meanp_2 + sigp_2 * stats.norm.ppf(x))
+            ),
+            0,
+            1,
+        )[0]
+    else:
+        nodes, weights = _get_nodes_weights(n_quad, K, opt_payoff, params, order=0)
+        # order 0
+        price_0 = np.sum(
+            weights
+            * payoff(
+                lbd * np.exp(meanp_1 + sigp_1 * nodes)
+                + (1.0 - lbd) * np.exp(meanp_2 + sigp_2 * nodes)
+            )
+        )
+
+    return price_0
+
+
+def _compute_price_mixed(n_quad, K, opt_payoff, params, order):
+    """Compute order 1, 2, or 3 price contribution for vix option in the mixed case."""
+    if order not in [0, 1, 2, 3]:
+        raise ValueError("order must be one of 0, 1, 2, or 3.")
+
+    if order == 0:
+        return _compute_price_0_mixed(n_quad, K, opt_payoff, params)
+
+    # Unpack parameters
+    lbd = params["lbd"]
+    meanp_1 = params["meanp_1"]
+    meanp_2 = params["meanp_2"]
+    sigp_1 = params["sigp_1"]
+    sigp_2 = params["sigp_2"]
+    volvol_1 = params["volvol_1"]
+    volvol_2 = params["volvol_2"]
+    fvix2 = params["fvix2"]
+    log_fvix2 = np.log(fvix2)
+
+    # Get gamma values for this order
+    gamma_key = f"gamma_{order}"
+    gammas = params[gamma_key]
+
+    # Get derivative of payoff function
+    dpayoff_mixed_dy = _deriv_vix_payoff_mixed(opt_payoff, K)
+
+    def _func_psi(x, idx=1):
+        """Compute psi function for given index (1 or 2)."""
+        sig_idx = sigp_1 if idx == 1 else sigp_2
+        mean_idx = meanp_1 - log_fvix2 if idx == 1 else meanp_2 - log_fvix2
+        return (
+            dpayoff_mixed_dy(
+                x=mean_idx + sig_idx * x,
+                lbd=lbd if idx == 1 else 1 - lbd,
+                volvol_1=volvol_1 if idx == 1 else volvol_2,
+                volvol_2=volvol_2 if idx == 1 else volvol_1,
+                fvix2=fvix2,
+                mu_2=meanp_2 if idx == 1 else meanp_1,
+            )
+            * sig_idx
+        )
+
+    def _get_order_weight(x, order):
+        """Get the order-dependent weight function."""
+        if order == 1:
+            return 1.0
+        elif order == 2:
+            return x
+        else:  # order == 3
+            return x**2 - 1
+
+    psi_1 = lambda x: _func_psi(x, idx=1)
+    psi_2 = lambda x: _func_psi(x, idx=2)
+    order_weight = lambda x: _get_order_weight(x, order)
+
+    if n_quad is None:
+        # Use scipy.quad for continuous integration
+        def integrand_1(u):
+            x = stats.norm.ppf(u)
+            return order_weight(x) * gammas[0] * psi_1(x)
+
+        def integrand_2(u):
+            x = stats.norm.ppf(u)
+            return order_weight(x) * gammas[1] * psi_2(x)
+
+        left_1, right_1 = _get_nodes_weights(
+            n_quad, K, opt_payoff, params, order, idx=1
+        )
+        left_2, right_2 = _get_nodes_weights(
+            n_quad, K, opt_payoff, params, order, idx=2
+        )
+
+        price_1 = integrate.quad(integrand_1, left_1, right_1)[0]
+        price_2 = integrate.quad(integrand_2, left_2, right_2)[0]
+    else:
+        # Use Gauss quadrature for discrete approximation
+        nodes_1, weights_1 = _get_nodes_weights(
+            n_quad, K, opt_payoff, params, order, idx=1
+        )
+        nodes_2, weights_2 = _get_nodes_weights(
+            n_quad, K, opt_payoff, params, order, idx=2
+        )
+
+        # Compute integrands with order-dependent weights
+        weight_fn = order_weight(nodes_1)
+        integrand_1 = weight_fn * psi_1(nodes_1)
+
+        weight_fn = order_weight(nodes_2)
+        integrand_2 = weight_fn * psi_2(nodes_2)
+
+        price_1 = gammas[0] * np.sum(weights_1 * np.asarray(integrand_1))
+        price_2 = gammas[1] * np.sum(weights_2 * np.asarray(integrand_2))
+
+    return price_1 + price_2
+
+
+def _get_nodes_weights(n_quad, K, opt_payoff, params, order, idx=1):
+    """
+    Get quadrature nodes and weights for mixed VIX pricing.
+
+    Parameters
+    ----------
+    n_quad : int
+        Quadrature points.
+    K : float
+        Strike price.
+    opt_payoff : str
+        Option payoff type.
+    params : dict
+        Model parameters.
+    order : int
+        Approximation order.
+    idx : int, optional
+        Index for psi function, by default 1
+
+    Returns
+    -------
+    tuple
+        Quadrature nodes, weights, left, right.
+    """
+    lbd = params["lbd"]
+    meanp_1 = params["meanp_1"]
+    meanp_2 = params["meanp_2"]
+    sigp_1 = params["sigp_1"]
+    sigp_2 = params["sigp_2"]
+    volvol_1 = params["volvol_1"]
+    volvol_2 = params["volvol_2"]
+    fvix2 = params["fvix2"]
+    # log_fvix2 = np.log(fvix2)
+
+    if opt_payoff == "fut" and n_quad is None:
+        left = 0.0
+        right = 1.0
+
+    if opt_payoff in ["call", "put"]:
+        # TODO: check why order >= 1 is not working
+
+        # A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+        # endpoint = A - sigp_2 / 2
+        # print("endpoint:", endpoint)
+
+        # endpoint1 = _inverse_x_inner_mixed_func(
+        #     z=K**2,
+        #     mu_2=meanp_2 if idx == 1 else meanp_1,
+        #     lbd=lbd if idx == 1 else 1 - lbd,
+        #     volvol_1=volvol_1 if idx == 1 else volvol_2,
+        #     volvol_2=volvol_2 if idx == 1 else volvol_1,
+        #     fvix2=fvix2,
+        # )
+        # print("endpoint1:", endpoint1)
+
+        if order == 0:
+            A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+            endpoint = A - sigp_2 / 2
+        else:
+            endpoint = _inverse_x_inner_mixed_func(
+                z=K**2,
+                mu_2=meanp_2 if idx == 1 else meanp_1,
+                lbd=lbd if idx == 1 else 1 - lbd,
+                volvol_1=volvol_1 if idx == 1 else volvol_2,
+                volvol_2=volvol_2 if idx == 1 else volvol_1,
+                fvix2=fvix2,
+            )
+
+        left = stats.norm.cdf(endpoint) if opt_payoff == "call" else 0.0
+        right = 1.0 if opt_payoff == "call" else stats.norm.cdf(endpoint)
+
+    if n_quad is None:
+        return left, right
+
+    if opt_payoff == "fut":
+        # Gauss-Hermite quadrature for future payoff
+        nodes, weights = utils.gauss_hermite(n_quad)
+    else:
+        # Gauss-Legendre quadrature for call/put payoff
+        nodes, weights = utils.gauss_legendre(float(left), float(right), n_quad)
+        nodes = stats.norm.ppf(nodes)
+
+    return nodes, weights

@@ -1,26 +1,83 @@
 import numpy as np
 from scipy import optimize, special
+
 from utils import gauss_hermite
 
 
-def _inner_mixed_func(x, lbd, mu_2, eta_1, eta_2, fvix2):
-    """Inner function for mixed proxy payoff calculations."""
+def _inner_mixed_func(x, lbd, mu_2, volvol_1, volvol_2, fvix2):
+    """
+    Compute the inner function for mixed proxy payoff calculations.
+
+    Parameters
+    ----------
+    x : float or np.ndarray
+        Gaussian random variable.
+    lbd : float
+        Mixing weight in [0, 1].
+    mu_2 : float
+        Location parameter of the second component.
+    volvol_1, volvol_2 : float
+        Scale parameters of the two volatility-of-volatility components.
+    fvix2 : float
+        VIX squared futures price.
+
+    Returns
+    -------
+    float or np.ndarray
+        Value of the inner function.
+    """
     log_fvix2 = np.log(fvix2)
-    term_x = (eta_1 - eta_2) * (mu_2 - log_fvix2) / eta_2 + (eta_2 / eta_1) * x
+    term_x = (volvol_1 - volvol_2) * (mu_2 - log_fvix2) / volvol_2 + (
+        volvol_2 / volvol_1
+    ) * x
     return fvix2 * (lbd * np.exp(x) + (1 - lbd) * np.exp(term_x))
 
 
-def _inverse_x_inner_mixed_func(z, mu_2, lbd, eta_1, eta_2, fvix2):
-    """Inverse of the inner function for mixed proxy payoff calculations."""
+def _inverse_x_inner_mixed_func(z, mu_2, lbd, volvol_1, volvol_2, fvix2):
+    """
+    Compute the inverse of the inner function for mixed proxy payoff calculations.
+
+    Parameters
+    ----------
+    z : float
+        Target value.
+    mu_2 : float
+        Location parameter of the second component.
+    lbd : float
+        Mixing weight in [0, 1].
+    volvol_1, volvol_2 : float
+        Scale parameters of the two volatility-of-volatility components.
+    fvix2 : float
+        VIX squared futures price.
+
+    Returns
+    -------
+    float
+        Solution x to the inner function equation.
+    """
 
     def func(x):
-        return _inner_mixed_func(x, lbd, mu_2, eta_1, eta_2, fvix2) - z
+        return _inner_mixed_func(x, lbd, mu_2, volvol_1, volvol_2, fvix2) - z
 
     return optimize.root_scalar(func, bracket=[-100, 100]).root
 
 
 def _vix_payoff(opt_payoff, K=0.0):
-    """Create vix payoff functions based on option type."""
+    """
+    Create VIX payoff function based on option type.
+
+    Parameters
+    ----------
+    opt_payoff : str
+        Option type: 'fut' for futures, 'call' for call options, 'put' for put options.
+    K : float, optional
+        Strike price (only used for calls and puts). Default is 0.0.
+
+    Returns
+    -------
+    callable
+        Payoff function that takes VIX squared values and returns payoffs.
+    """
     if opt_payoff not in ["fut", "call", "put"]:
         raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
 
@@ -36,12 +93,26 @@ def _vix_payoff(opt_payoff, K=0.0):
 
 
 def _deriv_vix_payoff_mixed(opt_payoff, K=0.0):
-    """Create derivative of vix payoff functions for mixed proxy."""
+    """
+    Create derivative of VIX payoff function for mixed proxy calculations.
+
+    Parameters
+    ----------
+    opt_payoff : str
+        Option type: 'fut' for futures, 'call' for call options, 'put' for put options.
+    K : float, optional
+        Strike price (only used for calls and puts). Default is 0.0.
+
+    Returns
+    -------
+    callable
+        Derivative of payoff function used in mixed proxy calculations.
+    """
     if opt_payoff not in ["fut", "call", "put"]:
         raise ValueError("opt_payoff must be one of 'fut', 'call', or 'put'.")
 
-    def dpayoff_mixed_dy(x, lbd, mu_2, eta_1, eta_2, fvix2):
-        sqrt_inner = _inner_mixed_func(x, lbd, mu_2, eta_1, eta_2, fvix2) ** 0.5
+    def dpayoff_mixed_dy(x, lbd, mu_2, volvol_1, volvol_2, fvix2):
+        sqrt_inner = _inner_mixed_func(x, lbd, mu_2, volvol_1, volvol_2, fvix2) ** 0.5
         base_derivative = fvix2 * lbd * np.exp(x) / (2.0 * sqrt_inner)
 
         if opt_payoff == "fut":
@@ -101,8 +172,8 @@ def _hermite_polynomial_weights(n_trunc, b, c, n_quad):
 
     Returns
     -------
-    float
-        Weighted sum of normalized Hermite polynomials.
+    np.ndarray
+        Array of weighted sums of normalized Hermite polynomials for orders 0 to n_trunc.
     """
     x_herm, w_herm = gauss_hermite(n_quad)
 

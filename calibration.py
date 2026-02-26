@@ -1,6 +1,7 @@
 import numpy as np
-from rbergomi import RoughBergomi
 from scipy.optimize import least_squares
+
+from rbergomi import RoughBergomi
 
 
 def fun(
