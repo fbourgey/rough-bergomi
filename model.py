@@ -917,7 +917,7 @@ class ForwardVarianceModel(ABC):
         total_price = 0.0
         for current_order in range(order + 1):
             prices[current_order] = _compute_price_mixed(
-                n_quad, K, opt_payoff, params, order=current_order
+                n_quad, K, opt_payoff, params, current_order
             )
             total_price += prices[current_order]
 
@@ -1300,19 +1300,15 @@ def _compute_price_mixed(n_quad, K, opt_payoff, params, order):
     volvol_1 = params["volvol_1"]
     volvol_2 = params["volvol_2"]
     fvix2 = params["fvix2"]
-    log_fvix2 = np.log(fvix2)
-
-    # Get gamma values for this order
-    gamma_key = f"gamma_{order}"
-    gammas = params[gamma_key]
-
-    # Get derivative of payoff function
+    # Gamma values for this order
+    gammas = params[f"gamma_{order}"]
+    # Derivative of payoff function
     dpayoff_mixed_dy = _deriv_vix_payoff_mixed(opt_payoff, K)
 
     def _func_psi(x, idx=1):
         """Compute psi function for given index (1 or 2)."""
         sig_idx = sigp_1 if idx == 1 else sigp_2
-        mean_idx = meanp_1 - log_fvix2 if idx == 1 else meanp_2 - log_fvix2
+        mean_idx = meanp_1 - np.log(fvix2) if idx == 1 else meanp_2 - np.log(fvix2)
         return (
             dpayoff_mixed_dy(
                 x=mean_idx + sig_idx * x,
@@ -1435,8 +1431,10 @@ def _get_nodes_weights(n_quad, K, opt_payoff, params, order, idx=1):
         # print("endpoint1:", endpoint1)
 
         if order == 0:
-            A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
-            endpoint = A - sigp_2 / 2
+            endpoint = _inverse_mixture_lognormal(
+                K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2
+            )
+            # endpoint = A - sigp_2 / 2
         else:
             endpoint = _inverse_x_inner_mixed_func(
                 z=K**2,

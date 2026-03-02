@@ -26,11 +26,9 @@ def _inner_mixed_func(x, lbd, mu_2, volvol_1, volvol_2, fvix2):
     float or np.ndarray
         Value of the inner function.
     """
-    log_fvix2 = np.log(fvix2)
-    term_x = (volvol_1 - volvol_2) * (mu_2 - log_fvix2) / volvol_2 + (
-        volvol_2 / volvol_1
-    ) * x
-    return fvix2 * (lbd * np.exp(x) + (1 - lbd) * np.exp(term_x))
+    scaled_x = (volvol_2 / volvol_1) * x
+    adjustment = (volvol_1 / volvol_2 - 1.0) * (np.log(fvix2) - mu_2)
+    return fvix2 * (lbd * np.exp(x) + (1.0 - lbd) * np.exp(adjustment + scaled_x))
 
 
 def _inverse_x_inner_mixed_func(z, mu_2, lbd, volvol_1, volvol_2, fvix2):
@@ -118,9 +116,9 @@ def _deriv_vix_payoff_mixed(opt_payoff, K=0.0):
         if opt_payoff == "fut":
             return base_derivative
         elif opt_payoff == "call":
-            return base_derivative * (sqrt_inner > K)
+            return base_derivative * (sqrt_inner >= K)
         else:  # "put"
-            return -base_derivative * (sqrt_inner < K)
+            return -base_derivative * (sqrt_inner <= K)
 
     return dpayoff_mixed_dy
 
@@ -173,7 +171,8 @@ def _hermite_polynomial_weights(n_trunc, b, c, n_quad):
     Returns
     -------
     np.ndarray
-        Array of weighted sums of normalized Hermite polynomials for orders 0 to n_trunc.
+        Array of weighted sums of normalized Hermite polynomials for orders 0 to
+        n_trunc.
     """
     x_herm, w_herm = gauss_hermite(n_quad)
 
