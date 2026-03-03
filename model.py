@@ -7,6 +7,7 @@ from scipy.special import eval_hermitenorm
 
 import utils
 from utils_vix import (
+    _compute_coeff_mixed_case,
     _deriv_vix_payoff_mixed,
     _hermite_polynomial_weights,
     _inverse_mixture_lognormal,
@@ -840,15 +841,10 @@ class ForwardVarianceModel(ABC):
             "meanp_2": mean_2,
             "sigp_1": sig_1,
             "sigp_2": sig_2,
+            "gamma_1": (self.gamma_1_proxy(T=T), model_2.gamma_1_proxy(T=T)),
+            "gamma_2": (self.gamma_2_proxy(T=T), model_2.gamma_2_proxy(T=T)),
+            "gamma_3": (self.gamma_3_proxy(T=T), model_2.gamma_3_proxy(T=T)),
         }
-
-        # Compute gamma parameters as needed
-        if order >= 1:
-            params["gamma_1"] = (self.gamma_1_proxy(T=T), model_2.gamma_1_proxy(T=T))
-        if order >= 2:
-            params["gamma_2"] = (self.gamma_2_proxy(T=T), model_2.gamma_2_proxy(T=T))
-        if order == 3:
-            params["gamma_3"] = (self.gamma_3_proxy(T=T), model_2.gamma_3_proxy(T=T))
 
         return params
 
@@ -861,7 +857,7 @@ class ForwardVarianceModel(ABC):
         order: int,
         n_quad: int | None = 50,
         K: float = 0.0,
-        n_trunc_herm: int | None = 0,
+        n_trunc_herm: int = 0,
     ):
         """
         Price a VIX option in the mixed case using the weak approximation.
@@ -884,7 +880,7 @@ class ForwardVarianceModel(ABC):
             scipy integrate.quad is used.
         K : float, optional (default is 0.0)
             Strike of the VIX option.
-        n_trunc_herm : int | None, optional (default is 0)
+        n_trunc_herm : int optional (default is 0)
             If greater than 0, use Hermite series expansion with truncation order
             n_trunc_herm for the order 0 approximation.
 
@@ -897,7 +893,7 @@ class ForwardVarianceModel(ABC):
         self._validate_mixed_params(T, lbd, volvol_2, opt_payoff, order, n_quad)
 
         # Use Hermite series expansion for order 0 if specified
-        if n_trunc_herm and n_trunc_herm > 0:
+        if n_trunc_herm > 0:
             return self.price_vix_approx_mixed_series(
                 T=T,
                 lbd=lbd,
@@ -936,40 +932,58 @@ class ForwardVarianceModel(ABC):
         sigp_1 = params["sigp_1"]
         sigp_2 = params["sigp_2"]
 
-        if order != 0:
-            raise NotImplementedError(
-                "Hermite series expansion is only implemented for order=0."
+        if order not in [0, 3]:
+            raise ValueError(
+                "Hermite series expansion only implemented for order 0 and 3."
             )
+
+        a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
+        b = (lbd / (1 - lbd)) * np.exp(
+            meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
+        )
+        # get Hermite polynomial weights
+        weights_herm = _hermite_polynomial_weights(
+            n_trunc_herm, b, sigp_1 - sigp_2, n_quad
+        )
+        c_vec = _compute_coeff_mixed_case(params)
 
         if opt_payoff == "fut":
-            # Gauss-Hermite quadrature
-            price_0 = self.price_vix_approx_mixed(
-                T=T,
-                lbd=lbd,
-                volvol_2=volvol_2,
-                opt_payoff="fut",
-                order=order,
-                n_quad=n_quad,
-            )
-        else:
-            A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
-            B = A - sigp_2 / 2
-            a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
-            b = (lbd / (1 - lbd)) * np.exp(
-                meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
-            )
-            c = sigp_1 - sigp_2
-            weights_herm = _hermite_polynomial_weights(n_trunc_herm, b, c, n_quad)
-            sgn = 1.0 if opt_payoff == "call" else -1.0
+            if order == 0:
+                return a * weights_herm[0, 0]
+            else:
+                return np.dot(c_vec, weights_herm[:, 0])
 
-            I_N = weights_herm[0] * stats.norm.cdf(-sgn * B) + sgn * np.sum(
-                weights_herm[1:]
-                * eval_hermitenorm(np.arange(n_trunc_herm), B)
-                * stats.norm.pdf(B)
-            )
-            price_0 = sgn * a * I_N - sgn * K * stats.norm.cdf(-sgn * A)
+        A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+        B = A - sigp_2 / 2
 
-        return price_0
+        I_N_vec = np.array(
+            [
+                weights_herm[_order, 0] * stats.norm.cdf(-B)
+                + np.sum(
+                    weights_herm[_order, 1:]
+                    * eval_hermitenorm(np.arange(n_trunc_herm), B)
+                    * stats.norm.pdf(B)
+                )
+                for _order in [0, 1, 2, 3]
+            ]
+        )
+
+        if order == 0:
+            return (
+                a * I_N_vec[0] - K * stats.norm.cdf(-A)
+                if opt_payoff == "call"
+                else K * stats.norm.cdf(A) - a * (weights_herm[0, 0] - I_N_vec[0])
+            )
+
+        # order 3
+
+        I_N_tot = np.dot(c_vec, I_N_vec)
+
+        return (
+            I_N_tot - K * stats.norm.cdf(-A)
+            if opt_payoff == "call"
+            else K * stats.norm.cdf(A) - (a * weights_herm[0, 0] - I_N_tot)
+        )
 
     def implied_vol_vix_approx_mixed(
         self,
@@ -980,7 +994,7 @@ class ForwardVarianceModel(ABC):
         volvol_2: float,
         n_quad: int | None = 50,
         return_opt="impvol",
-        n_trunc_herm: int | None = 0,
+        n_trunc_herm: int = 0,
     ):
         """
         Compute the implied volatility of a VIX option using a mixed
@@ -1003,7 +1017,7 @@ class ForwardVarianceModel(ABC):
         return_opt : str, optional
             If 'impvol', return only the implied volatility.
             If 'all', return both the futures price and the implied volatility.
-        n_trunc_herm : int | None, optional
+        n_trunc_herm : int, optional (default is 0)
             If greater than 0, use Hermite series expansion with truncation order
             n_trunc_herm for the order 0 approximation.
 
@@ -1136,12 +1150,12 @@ class ForwardVarianceModel(ABC):
 
     def implied_vol_vix_expansion_mixed(
         self,
-        K,
+        k,
         T,
         lbd,
         volvol_2,
-        order,
         opt,
+        order=3,
         n_quad=30,
         n_trunc_herm=10,
     ):
@@ -1150,8 +1164,8 @@ class ForwardVarianceModel(ABC):
 
         Parameters
         ----------
-        K : float or array_like
-            Strike price.
+        k : float or array_like
+            Log strike price.
         T : float
             Time to maturity (T > 0).
         lbd : float
@@ -1173,18 +1187,10 @@ class ForwardVarianceModel(ABC):
         ValueError
             If `order` not in {0,1,2} or if `T <= 0`.
         """
-        # TODO: finish and check implementation
-        # this is probably wrong as of now
+        # TODO: finish and check implementation and clean up code
+        # This is probably wrong as of now
         if opt not in [1, 2, 3]:
             raise ValueError("opt 1, 2, or 3 must be specified.")
-
-        if order not in [0, 1, 2]:
-            raise ValueError("order must be one of 0, 1, or 2.")
-
-        if order != 0.0:
-            raise NotImplementedError(
-                "Mixed expansion is only implemented for order 0."
-            )
 
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
@@ -1199,24 +1205,7 @@ class ForwardVarianceModel(ABC):
                 "model name not one of 'rough_bergomi' or 'one_factor_bergomi'."
             )
 
-        fvix2 = self.fut_vix2(T)
-        meanp_1 = np.log(fvix2) + self.mean_proxy(T)
-        meanp_2 = np.log(fvix2) + model_2.mean_proxy(T)
-        sigp_1 = self.var_proxy(T) ** 0.5
-        sigp_2 = model_2.var_proxy(T) ** 0.5
-        A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
-        B = A - sigp_2 / 2
-
-        a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
-        b = (lbd / (1 - lbd)) * np.exp(
-            meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
-        )
-        c = sigp_1 - sigp_2
-        weights_herm = _hermite_polynomial_weights(n_trunc_herm, b, c, n_quad)
-
-        k1 = K
-        x1 = k1 - 0.5 * B * sigp_2 - sigp_2**2 / 8
-        price_fut = self.price_vix_approx_mixed(
+        F = self.price_vix_approx_mixed(
             T=T,
             lbd=lbd,
             volvol_2=volvol_2,
@@ -1224,29 +1213,43 @@ class ForwardVarianceModel(ABC):
             order=order,
             n_trunc_herm=n_trunc_herm,
         )
-        x2 = np.log(float(price_fut))
-        # k2 = x2 + 0.5 * B * sigp_2 + sigp_2**2 / 8
+        K = F * np.exp(k)
+
+        params = self._get_params_mixed(T, lbd, volvol_2, order)
+        meanp_1 = params["meanp_1"]
+        meanp_2 = params["meanp_2"]
+        sigp_1 = params["sigp_1"]
+        sigp_2 = params["sigp_2"]
+
+        A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+        B = A - sigp_2 / 2
+
+        b = (lbd / (1 - lbd)) * np.exp(
+            meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
+        )
+        weights_herm = _hermite_polynomial_weights(
+            n_trunc_herm, b, sigp_1 - sigp_2, n_quad
+        )
+
+        x1 = k - 0.5 * B * sigp_2 - sigp_2**2 / 8
+        x2 = np.log(float(F))
         x3 = 0.5 * (x1 + x2)
-        # k3 = 0.5 * (k1 + k2)
-
         sig_tilde = sigp_2 / np.sqrt(T)
-        gamma_1_2 = model_2.gamma_1_proxy(T)
-        gamma_2_2 = model_2.gamma_2_proxy(T)
-        gamma_3_2 = model_2.gamma_3_proxy(T)
+        c_vec = _compute_coeff_mixed_case(params)
 
-        c0 = (1 + 0.5 * gamma_1_2 + 0.25 * gamma_2_2 + 0.125 * gamma_3_2) * a
+        if opt == 1:
+            x_opt = x1
+        elif opt == 2:
+            x_opt = x2
+        elif opt == 3:
+            x_opt = x3
 
-        if order == 0:
-            if opt == 1:
-                x_opt = x1
-            elif opt == 2:
-                x_opt = x2
-            elif opt == 3:
-                x_opt = x3
-
-            impvol = 0.5 * sig_tilde + c0 * np.sum(
-                weights_herm[1:] * eval_hermitenorm(np.arange(n_trunc_herm), B)
-            ) / (np.exp(x_opt) * np.sqrt(T))
+        impvol = 0.5 * sig_tilde
+        impvol += np.sum(
+            c_vec[:, None]
+            * weights_herm[:, 1:]
+            * eval_hermitenorm(np.arange(n_trunc_herm), B)
+        ) / (np.exp(x_opt) * np.sqrt(T))
 
         return impvol
 

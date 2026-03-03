@@ -156,13 +156,13 @@ def _inverse_mixture_lognormal(y, lbd, mu_1, mu_2, sig_1, sig_2):
 
 def _hermite_polynomial_weights(n_trunc, b, c, n_quad):
     """
-    Compute weighted sum of normalized Hermite polynomials using Gauss-Hermite
-    quadrature.
+    Compute weighted sums of normalized Hermite polynomials using Gauss-Hermite
+    quadrature for g(y) = sqrt(1 + b * exp(c * y)) and its derivatives.
 
     Parameters
     ----------
     n_trunc : int
-        Number of Hermite polynomials to sum over.
+        Maximum order of Hermite polynomials.
     b, c : float
         Parameters for the weight function g(y) = sqrt(1 + b * exp(c * y)).
     n_quad : int
@@ -171,18 +171,76 @@ def _hermite_polynomial_weights(n_trunc, b, c, n_quad):
     Returns
     -------
     np.ndarray
-        Array of weighted sums of normalized Hermite polynomials for orders 0 to
-        n_trunc.
+        Shape (4, n_trunc + 1) array where weights[k, n] corresponds to the k-th
+        derivative order (k=0,1,2,3) and n-th Hermite polynomial order.
     """
     x_herm, w_herm = gauss_hermite(n_quad)
 
-    def g(y):
-        return (1 + b * np.exp(c * y)) ** 0.5
+    def _g(y):
+        return (1.0 + b * np.exp(c * y)) ** 0.5
 
-    def integrand(n, y):
-        return g(y) * special.eval_hermitenorm(n, y) / special.factorial(n)
+    def _g_deriv(y, order):
+        if order not in [0, 1, 2, 3]:
+            raise ValueError("order must be 0, 1, 2, or 3")
+        if order == 0:
+            return _g(y)
+        elif order == 1:
+            return 0.5 * (_g(y) - _g(y) ** (-1))
+        elif order == 2:
+            return 0.25 * (_g(y) - _g(y) ** (-3))
+        else:
+            return 0.125 * (_g(y) + 2.0 * _g(y) ** (-3) - 3.0 * _g(y) ** (-5))
+
+    def integrand(n, y, order):
+        return (
+            _g_deriv(y, order) * special.eval_hermitenorm(n, y) / special.factorial(n)
+        )
 
     weights = np.array(
-        [np.sum(w_herm * integrand(n, x_herm)) for n in range(n_trunc + 1)]
+        [
+            [np.sum(w_herm * integrand(n, x_herm, order)) for n in range(n_trunc + 1)]
+            for order in range(4)
+        ]
     )
     return weights
+
+
+def _compute_coeff_mixed_case(params):
+    """Compute coefficients c0, c1, c2, c3 based on the mixed case formulas."""
+
+    lbd = params["lbd"]
+    meanp_2 = params["meanp_2"]
+    sigp_1 = params["sigp_1"]
+    sigp_2 = params["sigp_2"]
+    gamma_1 = params["gamma_1"]
+    gamma_2 = params["gamma_2"]
+    gamma_3 = params["gamma_3"]
+
+    a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
+
+    c0 = (1 + 0.5 * gamma_1[1] + 0.25 * gamma_2[1] + 0.125 * gamma_3[1]) * a
+
+    c1 = (
+        gamma_1[0]
+        - gamma_1[1]
+        + gamma_2[0] * sigp_2 / (2 * sigp_1)
+        - gamma_2[1] * (1 - sigp_1 / (2 * sigp_2))
+        + gamma_3[0] * sigp_2**2 / (4 * sigp_1**2)
+        - gamma_3[1] * (0.75 - sigp_1 / (2 * sigp_2))
+    ) * a
+
+    c2 = (
+        gamma_2[0] * (1 - sigp_2 / sigp_1)
+        + gamma_2[1] * (1 - sigp_1 / sigp_2)
+        + gamma_3[0] * (sigp_2 / sigp_1 - sigp_2**2 / sigp_1**2)
+        + gamma_3[1] * (1.5 - 2 * sigp_1 / sigp_2 + sigp_1**2 / (2 * sigp_2**2))
+    ) * a
+
+    c3 = (
+        gamma_3[0] * (1 - 2 * sigp_2 / sigp_1 + sigp_2**2 / sigp_1**2)
+        - gamma_3[1] * (1 - 2 * sigp_1 / sigp_2 + sigp_1**2 / sigp_2**2)
+    ) * a
+
+    c_vec = np.array([c0, c1, c2, c3])
+
+    return c_vec
