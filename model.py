@@ -1154,7 +1154,7 @@ class ForwardVarianceModel(ABC):
         T,
         lbd,
         volvol_2,
-        opt,
+        opt=1,
         order=3,
         n_quad=30,
         n_trunc_herm=10,
@@ -1205,25 +1205,16 @@ class ForwardVarianceModel(ABC):
                 "model name not one of 'rough_bergomi' or 'one_factor_bergomi'."
             )
 
-        F = self.price_vix_approx_mixed(
-            T=T,
-            lbd=lbd,
-            volvol_2=volvol_2,
-            opt_payoff="fut",
-            order=order,
-            n_trunc_herm=n_trunc_herm,
-        )
-        K = F * np.exp(k)
-
         params = self._get_params_mixed(T, lbd, volvol_2, order)
         meanp_1 = params["meanp_1"]
         meanp_2 = params["meanp_2"]
         sigp_1 = params["sigp_1"]
         sigp_2 = params["sigp_2"]
 
-        A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
-        B = A - sigp_2 / 2
+        print("sigp_1", sigp_1)
+        print("sigp_2", sigp_2)
 
+        a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
         b = (lbd / (1 - lbd)) * np.exp(
             meanp_1 - meanp_2 + (sigp_1 - sigp_2) * sigp_2 / 2
         )
@@ -1231,27 +1222,50 @@ class ForwardVarianceModel(ABC):
             n_trunc_herm, b, sigp_1 - sigp_2, n_quad
         )
 
-        x1 = k - 0.5 * B * sigp_2 - sigp_2**2 / 8
-        x2 = np.log(float(F))
-        x3 = 0.5 * (x1 + x2)
-        sig_tilde = sigp_2 / np.sqrt(T)
-        c_vec = _compute_coeff_mixed_case(params)
+        F = a * weights_herm[0, 0]
+        K = F * np.exp(k)
 
-        if opt == 1:
-            x_opt = x1
-        elif opt == 2:
-            x_opt = x2
-        elif opt == 3:
-            x_opt = x3
+        A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
+        B = A - sigp_2 / 2
 
-        impvol = 0.5 * sig_tilde
-        impvol += np.sum(
-            c_vec[:, None]
-            * weights_herm[:, 1:]
-            * eval_hermitenorm(np.arange(n_trunc_herm), B)
-        ) / (np.exp(x_opt) * np.sqrt(T))
+        sig0 = sigp_2 / 2
+        sig1 = (
+            np.sum(weights_herm[0, 1:] * eval_hermitenorm(np.arange(n_trunc_herm), B))
+            / weights_herm[0, 0]
+        )
+        sig2 = -A * B * sig1**2 / sigp_2
+        sig3 = (
+            (2.0 / 3.0)
+            * (2.0 * (A * B) ** 2 + (A**2 + B**2 + A * B))
+            * sig1**3
+            / (sigp_2**2)
+        )
 
-        return impvol
+        # return (sig0 + sig1) / np.sqrt(T)
+        return (sig0 + sig1 + sig2) / np.sqrt(T)
+        # return (sig0 + sig1 + sig2 + sig3) / np.sqrt(T)
+
+        # x1 = k - 0.5 * B * sigp_2 - sigp_2**2 / 8
+        # x2 = np.log(float(F))
+        # x3 = 0.5 * (x1 + x2)
+        # sig_tilde = sigp_2 / np.sqrt(T)
+        # c_vec = _compute_coeff_mixed_case(params)
+
+        # if opt == 1:
+        #     x_opt = x1
+        # elif opt == 2:
+        #     x_opt = x2
+        # elif opt == 3:
+        #     x_opt = x3
+
+        # impvol = 0.5 * sig_tilde
+        # impvol += np.sum(
+        #     c_vec[:, None]
+        #     * weights_herm[:, 1:]
+        #     * eval_hermitenorm(np.arange(n_trunc_herm), B)
+        # ) / (np.exp(x_opt) * np.sqrt(T))
+
+        # return impvol
 
 
 def _compute_price_0_mixed(n_quad, K, opt_payoff, params):
