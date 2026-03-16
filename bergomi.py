@@ -19,7 +19,8 @@ class OneFactorBergomi(ForwardVarianceModel):
     rho : float
         Correlation between the spot and the volatility processes (must be in [-1, 1]).
     params : dict
-        Dictionary containing model parameters: 'k' (speed of mean reversion, must be positive)
+        Dictionary containing model parameters: 'k' (speed of mean reversion,
+        must be positive)
         and 'w' (volatility of volatility, must be positive).
     s0 : float, optional
         Initial spot price (must be positive). Default is 1.0.
@@ -105,8 +106,8 @@ class OneFactorBergomi(ForwardVarianceModel):
         n_quad : int
             Number of quadrature points for numerical integration.
         lbd : float or None, optional
-            If provided, use a mixed model with two different volatility-of-volatility values.
-            lbd is the weight for the first w value. Default is None.
+            If provided, use a mixed model with two different volatility-of-volatility
+            values. lbd is the weight for the first w value. Default is None.
         w_2 : float or None, optional
             If provided, use a mixed model with two different w values.
             This is the second w value. Must be provided if `lbd` is not None.

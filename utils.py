@@ -798,9 +798,9 @@ def sqrt_sum_lognorm_shifted_lognorm_approx(lbd, mu_1, mu_2, sig_1, sig_2, n_qua
 
     # compute first three moments of Y
     m1_y, m2_y, m3_y = (moment_v(p) for p in [1, 2, 3])
-    # print(f"m1_v: {m1_v}, m1_y: {m1_y}")
-    # print(f"m2_v: {m2_v}, m2_y: {m2_y}")
-    # print(f"m3_v: {m3_v}, m3_y: {m3_y}")
+    print(f"m1_v: {m1_v}, m1_y: {m1_y}")
+    print(f"m2_v: {m2_v}, m2_y: {m2_y}")
+    print(f"m3_v: {m3_v}, m3_y: {m3_y}")
 
     return {
         "c_y": c_y,

@@ -1123,11 +1123,19 @@ class ForwardVarianceModel(ABC):
         lognormal distributions with a single shifted lognormal distribution in the
         mixed case.
         """
+        # TODO: most likely wrong as of now, need to check and clean up code
+        raise NotImplementedError(
+            "Shifted lognormal approximation in the mixed case is not fully implemented yet."
+        )
         if order != 0:
             raise NotImplementedError(
                 "Shifted lognormal approximation is only implemented for order=0."
             )
         params = self._get_params_mixed(T, lbd, volvol_2, order)
+        F = self.price_vix_approx_mixed(
+            T=T, lbd=lbd, volvol_2=volvol_2, opt_payoff="fut", order=order
+        )
+        K = F * np.exp(k)
         # shifted lognormal parameters
         params_sl = utils.sqrt_sum_lognorm_shifted_lognorm_approx(
             lbd=params["lbd"],
@@ -1138,15 +1146,21 @@ class ForwardVarianceModel(ABC):
         )
         meanp = 2 * params_sl["mu_y"]
         tot_varp = (2 * params_sl["sig_y"]) ** 2
+        F = self.price_vix_fut_approx(T=T, order=order, meanp=meanp, tot_varp=tot_varp)
+        volp = np.sqrt(tot_varp / T)
         c_y = params_sl["c_y"]
+        price_0 = utils.black_price(K=K - c_y, T=T, F=F, vol=0.5 * volp, opttype=1)
+        return utils.black_impvol(K=K - c_y, T=T, F=F, value=price_0, opttype=1)
 
-        return self.implied_vol_vix_approx(
-            T=T,
-            k=np.log(np.exp(k) - c_y),
-            order=order,
-            meanp=meanp,
-            tot_varp=tot_varp,
-        )
+        # k = np.log((K - c_y) / F)
+
+        # return self.implied_vol_vix_approx(
+        #     T=T,
+        #     k=k,
+        #     order=order,
+        #     meanp=meanp,
+        #     tot_varp=tot_varp,
+        # )
 
     def implied_vol_vix_expansion_mixed(
         self,
@@ -1211,8 +1225,20 @@ class ForwardVarianceModel(ABC):
         sigp_1 = params["sigp_1"]
         sigp_2 = params["sigp_2"]
 
-        print("sigp_1", sigp_1)
-        print("sigp_2", sigp_2)
+        # sig0 = sigp_2 / 2
+        # sig1 = (
+        #     0.5
+        #     * lbd
+        #     * np.exp(meanp_1)
+        #     / (lbd * np.exp(meanp_1) + (1 - lbd) * np.exp(meanp_2))
+        # )
+        # sig2 = (
+        #     lbd
+        #     * (1 - lbd)
+        #     * np.exp(meanp_1 + meanp_2)
+        #     / (lbd * np.exp(meanp_1) + (1 - lbd) * np.exp(meanp_2)) ** 2
+        # ) * (k / (2 * sigp_2) + 3 * sigp_2 / 16)
+        # return (sig0 + sig1 + sig2) / np.sqrt(T)
 
         a = (1 - lbd) ** 0.5 * np.exp(meanp_2 / 2 + sigp_2**2 / 8)
         b = (lbd / (1 - lbd)) * np.exp(
@@ -1228,21 +1254,37 @@ class ForwardVarianceModel(ABC):
         A = _inverse_mixture_lognormal(K**2, lbd, meanp_1, meanp_2, sigp_1, sigp_2)
         B = A - sigp_2 / 2
 
+        # def func(x):
+        #     d1 = np.log(F / K) / x + 0.5 * x
+        #     d2 = d1 - x
+        #     return (
+        #         (F * stats.norm.cdf(d1) - K * stats.norm.cdf(d2))
+        #         - (F * stats.norm.cdf(-B) - K * stats.norm.cdf(-A))
+        #     ) ** 0.5
+
+        # sig_root = optimize.minimize(func, x0=sigp_2 / 2).x
+
+        # print(f"T, K: {T, K}")
+        # res = lbd * np.exp(meanp_1) * (K / F) ** (sigp_1 / sigp_2) + (1 - lbd) * np.exp(
+        #     meanp_2
+        # ) * (K / F)
+        # print(f"diff: {K**2 - res}")
+
         sig0 = sigp_2 / 2
         sig1 = (
             np.sum(weights_herm[0, 1:] * eval_hermitenorm(np.arange(n_trunc_herm), B))
             / weights_herm[0, 0]
         )
-        sig2 = -A * B * sig1**2 / sigp_2
-        sig3 = (
-            (2.0 / 3.0)
-            * (2.0 * (A * B) ** 2 + (A**2 + B**2 + A * B))
-            * sig1**3
-            / (sigp_2**2)
-        )
+        # sig2 = -A * B * sig1**2 / sigp_2
+        # sig3 = (
+        #     (2.0 / 3.0)
+        #     * (2.0 * (A * B) ** 2 + (A**2 + B**2 + A * B))
+        #     * sig1**3
+        #     / (sigp_2**2)
+        # )
 
-        # return (sig0 + sig1) / np.sqrt(T)
-        return (sig0 + sig1 + sig2) / np.sqrt(T)
+        return (sig0 + sig1) / np.sqrt(T)
+        # return (sig0 + sig1 + sig2) / np.sqrt(T)
         # return (sig0 + sig1 + sig2 + sig3) / np.sqrt(T)
 
         # x1 = k - 0.5 * B * sigp_2 - sigp_2**2 / 8
