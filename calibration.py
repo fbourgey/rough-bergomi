@@ -142,7 +142,11 @@ def optimize_calibration(
 #### full calibration
 
 
-def fun_all(x, days, voldata, ORDER=3, N_QUAD=50, return_error=True, weights=False):
+def xi0_nelson_siegel(u, b0, b1, b2, tau1, tau2):
+    return b0 + b1 * np.exp(-u / tau1) + b2 * (u / tau2) * np.exp(-u / tau2)
+
+
+def fun_all(x, days, voldata, order=3, n_quad=50, return_error=True, weights=False):
     """
     Compute residuals across multiple days with parametric forward variance curve.
 
@@ -154,11 +158,9 @@ def fun_all(x, days, voldata, ORDER=3, N_QUAD=50, return_error=True, weights=Fal
         Days to maturity (in calendar days).
     voldata : dict
         Volatility data indexed by day, containing 'k', 'F', 'Mid', and 'weights'.
-    ORDER : int, optional
+    order : int, optional
         Expansion order (default 3).
-    EPS : float, optional
-        Integration tolerance (default 1e-3).
-    N_QUAD : int, optional
+    n_quad : int, optional
         Number of quadrature points (default 50).
     return_error : bool, optional
         If True, return errors; if False, return model prices (default True).
@@ -172,34 +174,25 @@ def fun_all(x, days, voldata, ORDER=3, N_QUAD=50, return_error=True, weights=Fal
         else (Fs_approx, impvols_approx).
     """
 
-    # x = b0, b1, b2, tau1, tau2, H, eta_1, eta_2, lbd
+    b0, b1, b2, tau1, tau2, H, eta_1, eta_2, lbd = x
 
-    b0, b1, b2, tau1, tau2 = x[:5]
-
-    def xi0_func(u):
-        return b0 + b1 * np.exp(-u / tau1) + b2 * (u / tau2) * np.exp(-u / tau2)
-
-    H, eta_1, eta_2, lbd = x[5:]
-    params = {
-        "s0": 1.0,
-        "xi0": xi0_func,
-        "rho": -0.7,
-        "H": H,
-        "eta": eta_1,
-    }
-    rbergomi = RoughBergomi(**params, delta_vix=30 / 365.25)
+    rbergomi = RoughBergomi(
+        xi0=lambda u: xi0_nelson_siegel(u, b0, b1, b2, tau1, tau2),
+        params={"H": H, "eta": eta_1},
+        rho=-0.9,
+    )
 
     Fs_approx = []
     impvols_approx = []
 
     for day in days:
         F_approx_day, impvols_approx_day = rbergomi.implied_vol_vix_approx_mixed(
+            volvol_2=eta_2,
             lbd=lbd,
-            eta_2=eta_2,
             k=voldata[day]["k"],
             T=day / 365.25,
-            order=ORDER,
-            n_quad=N_QUAD,
+            order=order,
+            n_quad=n_quad,
             return_opt="all",
         )
         if weights:
@@ -221,6 +214,7 @@ def fun_all(x, days, voldata, ORDER=3, N_QUAD=50, return_error=True, weights=Fal
     error_impvols = (impvols - impvols_approx) / impvols
 
     error = np.concatenate((np.atleast_1d(error_Fs), np.asarray(error_impvols)))
+    print(f"Error: {np.linalg.norm(error)}")
     return error
 
 
@@ -228,9 +222,8 @@ def optimize_calibration_all(
     x0,
     days,
     voldata,
-    ORDER=3,
-    EPS=1e-3,
-    N_QUAD=50,
+    order=3,
+    n_quad=50,
     weights=False,
 ):
     """
@@ -244,11 +237,9 @@ def optimize_calibration_all(
         Days to maturity (in calendar days).
     voldata : dict
         Volatility data indexed by day.
-    ORDER : int, optional
+    order : int, optional
         Expansion order (default 3).
-    EPS : float, optional
-        Integration tolerance (default 1e-3).
-    N_QUAD : int, optional
+    n_quad : int, optional
         Number of quadrature points (default 50).
     weights : bool, optional
         If True, apply weights from voldata (default False).
@@ -258,19 +249,14 @@ def optimize_calibration_all(
     OptimizeResult
         Optimization result from scipy.optimize.least_squares.
     """
-
-    # x = b0, b1, b2, tau1, tau2, H, eta_1, eta_2, lbd
-
     lower_bounds = [1e-4, -1.0, -1.0, 1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 0.0]
     upper_bounds = [1.0, 1.0, 1.0, 20.0, 20.0, 0.5, 20.0, 20.0, 1.0]
     bounds = (lower_bounds, upper_bounds)
-
     result = least_squares(
         fun_all,
         x0=x0,
-        args=(days, voldata, ORDER, EPS, N_QUAD, True, weights),
+        args=(days, voldata, order, n_quad, True, weights),
         bounds=bounds,
         verbose=2,
     )
-
     return result
