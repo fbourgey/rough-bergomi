@@ -770,20 +770,26 @@ class ForwardVarianceModel(ABC):
         if T <= 0:
             raise ValueError("Maturity T must be positive.")
 
-        tot_var_proxy = self.var_proxy(T)
-        vol_proxy = np.sqrt(tot_var_proxy / T)
+        meanp = self.mean_proxy(T)
+        tot_varp = self.var_proxy(T)
+        vol_proxy = np.sqrt(tot_varp / T)
         gamma_2 = self.gamma_2_proxy(T)
         gamma_3 = self.gamma_3_proxy(T)
-        xp = 0.5 * self.mean_proxy(T) + tot_var_proxy / 8
+        xp = 0.5 * self.mean_proxy(T) + tot_varp / 8
+
+        k = np.atleast_1d(np.asarray(k))
+        F = self.price_vix_fut_approx(T=T, order=3, meanp=meanp, tot_varp=tot_varp)
+        K = F * np.exp(k)
+        log_strike = np.log(K)
 
         if order == 0:
-            return 0.5 * vol_proxy + 0.0 * k
+            return 0.5 * vol_proxy + 0.0 * log_strike
         else:
             return (
                 0.5 * vol_proxy
                 + gamma_2 / (2 * vol_proxy * T)
                 + 3 * gamma_3 / (8 * vol_proxy * T)
-                - gamma_3 * (xp - k) / (vol_proxy**3 * T**2)
+                - gamma_3 * (xp - log_strike) / (vol_proxy**3 * T**2)
             )
 
     ####################################################################################
